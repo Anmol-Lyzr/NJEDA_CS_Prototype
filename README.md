@@ -1,2 +1,0 @@
-# NJEDA_CS_Prototype
-NJEDA PROGRAM FINDER
