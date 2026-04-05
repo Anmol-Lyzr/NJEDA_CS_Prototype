@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "NJEDA Program Advisor Response",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["assistantText", "userProfile", "recommendations", "followUps"],
+  "properties": {
+    "assistantText": { "type": "string" },
+    "userProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["persona", "industry", "location", "stage", "needs", "timeline", "constraints"],
+      "properties": {
+        "persona": {
+          "type": "string",
+          "enum": ["vendor", "small_business", "startup", "lender", "other"]
+        },
+        "industry": { "type": "array", "items": { "type": "string" } },
+        "location": { "type": "string" },
+        "stage": { "type": "string" },
+        "needs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "funding",
+              "incentives",
+              "procurement",
+              "technical_assistance",
+              "real_estate",
+              "other"
+            ]
+          }
+        },
+        "timeline": { "type": "string" },
+        "constraints": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "recommendations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title", "program_url", "summary", "benefit_type", "who_its_for", "eligibility_bullets", "tags", "why_fit", "cta_label"],
+        "properties": {
+          "title": { "type": "string" },
+          "program_url": { "type": "string", "pattern": "^https?://" },
+          "summary": { "type": "string" },
+          "benefit_type": {
+            "type": "string",
+            "enum": [
+              "grant",
+              "loan",
+              "tax_credit",
+              "procurement",
+              "technical_assistance",
+              "real_estate",
+              "other"
+            ]
+          },
+          "who_its_for": { "type": "string" },
+          "eligibility_bullets": { "type": "array", "items": { "type": "string" } },
+          "tags": { "type": "array", "items": { "type": "string" } },
+          "why_fit": { "type": "string" },
+          "cta_label": { "type": "string" }
+        }
+      }
+    },
+    "followUps": { "type": "array", "items": { "type": "string" } }
+  }
+}
+

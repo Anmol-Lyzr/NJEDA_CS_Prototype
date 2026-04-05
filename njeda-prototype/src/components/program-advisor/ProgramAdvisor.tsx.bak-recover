@@ -1,0 +1,920 @@
+"use client";
+
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { ProgramRecommendation } from "@/lib/lyzr";
+
+type ChatMessage = { role: "user" | "assistant"; content: string };
+
+type ApiResponse = {
+  ok: boolean;
+  status: number;
+  assistantText?: string;
+  recommendations?: ProgramRecommendation[];
+  followUps?: string[];
+  userProfile?: {
+    persona?: string;
+    industry?: string[];
+    location?: string;
+    stage?: string;
+    needs?: string[];
+    timeline?: string;
+    constraints?: string[];
+  };
+  error?: string;
+};
+
+type PipelineStepId = "understand" | "retrieve" | "rank" | "followups" | "format";
+type PipelineStep = { id: PipelineStepId; title: string };
+
+function cn(...classes: Array<string | false | null | undefined>) {
+  return classes.filter(Boolean).join(" ");
+}
+
+function parseMetricLine(raw: string): {
+  text: string;
+  heading: string;
+  status?: string;
+  tag?: string;
+} {
+  try {
+    const j = JSON.parse(raw) as Record<string, unknown>;
+    const eventType = typeof j.event_type === "string" ? j.event_type : undefined;
+    const feature = typeof j.feature === "string" ? j.feature : undefined;
+    const status = typeof j.status === "string" ? j.status : undefined;
+    const message = typeof j.message === "string" ? j.message : undefined;
+
+    if (eventType === "open" || eventType === "ws_open" || eventType === "ws_close") {
+      return { text: "", heading: "", status };
+    }
+
+    const heading =
+      typeof feature === "string" && feature !== "__start__" && feature !== "__end__"
+        ? feature
+        : typeof eventType === "string"
+          ? eventType
+          : "step";
+
+    const text =
+      (typeof message === "string" && message) ||
+      (typeof j.text === "string" && j.text) ||
+      (typeof j.detail === "string" && j.detail) ||
+      (typeof j.step === "string" && j.step) ||
+      "";
+
+    const tag =
+      (typeof j.tag === "string" && j.tag) ||
+      (typeof j.category === "string" && j.category) ||
+      (typeof feature === "string" ? feature : undefined);
+
+    if (!String(text).trim()) {
+      const fallback = raw.trim() ? raw.slice(0, 500) : "";
+      return { text: fallback, heading, status, tag: tag ? String(tag).slice(0, 48) : undefined };
+    }
+
+    return { text: String(text).slice(0, 500), heading, status, tag: tag ? String(tag).slice(0, 48) : undefined };
+  } catch {
+    return { text: raw.slice(0, 500), heading: "step" };
+  }
+}
+
+function metricGlyph(tag?: string): string {
+  const t = (tag ?? "").toLowerCase();
+  if (t.includes("memory")) return "📄";
+  if (t.includes("tool")) return "🔧";
+  return "⚡";
+}
+
+function newSessionId(): string {
+  const rand = Math.random().toString(36).slice(2);
+  return `njeda-${Date.now().toString(36)}-${rand}`;
+}
+
+function ProgramRecCards({ recs }: { recs: ProgramRecommendation[] }) {
+  return (
+    <div className="space-y-3">
+      <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+        Recommended programs
+      </div>
+      <div className="flex flex-col gap-4">
+        {recs.map((r, idx) => (
+          <article
+            key={`${r.program_url}-${idx}`}
+            className="group overflow-hidden rounded-2xl border bg-white shadow-sm transition-shadow hover:shadow-md"
+          >
+            <div className="border-b bg-gradient-to-r from-slate-50 to-white p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-sm font-semibold text-slate-900">{r.title}</div>
+                  {r.benefit_type ? (
+                    <div className="mt-2 inline-flex items-center rounded-full bg-[#0F7C8C]/10 px-2 py-1 text-xs font-semibold text-[#0F7C8C]">
+                      {r.benefit_type}
+                    </div>
+                  ) : null}
+                </div>
+                <a
+                  className="shrink-0 rounded-lg border bg-white px-3 py-1.5 text-xs font-semibold text-slate-800 hover:bg-slate-50"
+                  href={r.program_url}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {r.cta_label ?? "View program"}
+                </a>
+              </div>
+
+              {r.summary ? (
+                <p className="mt-2 text-sm leading-6 text-slate-700">{r.summary}</p>
+              ) : null}
+            </div>
+
+            <div className="p-4">
+              {r.who_its_for ? (
+                <div className="mb-3 text-sm text-slate-700">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Who it’s for
+                  </div>
+                  <div className="mt-1">{r.who_its_for}</div>
+                </div>
+              ) : null}
+
+              {r.why_fit ? (
+                <div className="rounded-xl bg-slate-50 p-3 text-sm text-slate-700">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Why this fits
+                  </div>
+                  <div className="mt-1">{r.why_fit}</div>
+                </div>
+              ) : null}
+
+              {r.tags?.length ? (
+                <div className={cn("flex flex-wrap gap-2", r.why_fit ? "mt-3" : "")}>
+                  {r.tags.slice(0, 6).map((t) => (
+                    <span
+                      key={t}
+                      className="rounded-full bg-slate-100 px-2 py-1 text-xs font-medium text-slate-700"
+                    >
+                      {t}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+
+              {r.eligibility_bullets?.length ? (
+                <ul className="mt-3 space-y-1 text-sm text-slate-700">
+                  {r.eligibility_bullets.slice(0, 4).map((b, i) => (
+                    <li key={i} className="flex gap-2">
+                      <span className="mt-2 inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-slate-400" />
+                      <span className="min-w-0">{b}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+
+            <div className="border-t bg-slate-50 p-3">
+              <div className="text-xs text-slate-600">
+                Source:{" "}
+                <a
+                  className="font-medium text-slate-800 underline underline-offset-2"
+                  href={r.program_url}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  njeda.gov
+                </a>
+              </div>
+            </div>
+          </article>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+export type ProgramAdvisorProps = {
+  variant?: "floating" | "panel";
+  defaultOpen?: boolean;
+};
+
+export function ProgramAdvisor({ variant = "floating", defaultOpen = false }: ProgramAdvisorProps) {
+  const [open, setOpen] = useState(defaultOpen);
+  const [sessionId, setSessionId] = useState<string>("");
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [slow, setSlow] = useState(false);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [recs, setRecs] = useState<ProgramRecommendation[] | null>(null);
+  const [followUps, setFollowUps] = useState<string[] | null>(null);
+  const [userProfile, setUserProfile] = useState<ApiResponse["userProfile"] | null>(null);
+  const [showBehind, setShowBehind] = useState(false);
+  const [pipeline, setPipeline] = useState<Record<PipelineStepId, { done: boolean; active: boolean }>>({
+    understand: { done: false, active: false },
+    retrieve: { done: false, active: false },
+    rank: { done: false, active: false },
+    followups: { done: false, active: false },
+    format: { done: false, active: false },
+  });
+  const [lastMetric, setLastMetric] = useState<string | null>(null);
+  const [metricsEntries, setMetricsEntries] = useState<
+    Array<{ id: number; text: string; heading: string; status?: string; tag?: string }>
+  >([]);
+  const metricIdRef = useRef(0);
+  const [thinkingExpanded, setThinkingExpanded] = useState(true);
+
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const metricsRef = useRef<EventSource | null>(null);
+
+  useEffect(() => {
+    setSessionId(newSessionId());
+  }, []);
+
+  useEffect(() => {
+    // Connect to server-bridged metrics stream (which connects upstream to:
+    // wss://metrics.studio.lyzr.ai/ws/{sessionId}?x-api-key=...).
+    // We only keep it open while the modal is open.
+    if (!open || !sessionId) return;
+
+    // Reset for each session open (or session change).
+    setLastMetric(null);
+    metricIdRef.current = 0;
+    setMetricsEntries([]);
+    setPipeline({
+      understand: { done: false, active: false },
+      retrieve: { done: false, active: false },
+      rank: { done: false, active: false },
+      followups: { done: false, active: false },
+      format: { done: false, active: false },
+    });
+
+    try {
+      metricsRef.current?.close();
+    } catch {
+      /* ignore */
+    }
+
+    const es = new EventSource(`/api/metrics?sessionId=${encodeURIComponent(sessionId)}`);
+    metricsRef.current = es;
+
+    const mark = (id: PipelineStepId, state: Partial<{ done: boolean; active: boolean }>) => {
+      setPipeline((p) => ({
+        ...p,
+        [id]: {
+          done: state.done ?? p[id].done,
+          active: state.active ?? p[id].active,
+        },
+      }));
+    };
+
+    const deactivateAll = () => {
+      setPipeline((p) => ({
+        understand: { ...p.understand, active: false },
+        retrieve: { ...p.retrieve, active: false },
+        rank: { ...p.rank, active: false },
+        followups: { ...p.followups, active: false },
+        format: { ...p.format, active: false },
+      }));
+    };
+
+    const onMetric = (data: string) => {
+      setLastMetric(data);
+      const parsed = parseMetricLine(data);
+      if (parsed.text.trim()) {
+        const id = metricIdRef.current++;
+        setMetricsEntries((prev) => [
+          ...prev,
+          { id, text: parsed.text, heading: parsed.heading, status: parsed.status, tag: parsed.tag },
+        ].slice(-60));
+      }
+      const lower = data.toLowerCase();
+
+      // Heuristic mapping: we don't assume a strict schema; we infer progress from text.
+      // This can be tightened once we see the exact upstream payloads.
+      if (lower.includes("intent") || lower.includes("understand") || lower.includes("parse")) {
+        deactivateAll();
+        mark("understand", { active: true });
+      }
+      if (lower.includes("retrieve") || lower.includes("kb") || lower.includes("search") || lower.includes("rag")) {
+        mark("understand", { done: true, active: false });
+        deactivateAll();
+        mark("retrieve", { active: true });
+      }
+      if (lower.includes("score") || lower.includes("rank") || lower.includes("rerank")) {
+        mark("retrieve", { done: true, active: false });
+        deactivateAll();
+        mark("rank", { active: true });
+      }
+      if (lower.includes("follow") || lower.includes("question")) {
+        // follow-ups may happen early or late; don't force ordering too much.
+        mark("followups", { active: true });
+      }
+      if (lower.includes("format") || lower.includes("card") || lower.includes("render")) {
+        deactivateAll();
+        mark("format", { active: true });
+      }
+      if (lower.includes("done") || lower.includes("complete") || lower.includes("finished")) {
+        deactivateAll();
+        setPipeline((p) => ({
+          understand: { done: true, active: false },
+          retrieve: { done: true, active: false },
+          rank: { done: true, active: false },
+          followups: { done: p.followups.done || false, active: false },
+          format: { done: true, active: false },
+        }));
+      }
+    };
+
+    const messageHandler = (ev: MessageEvent<string>) => onMetric(ev.data);
+    const errorHandler = () => {
+      // If metrics fails, keep UI usable (we just won't show real-time progress).
+      setLastMetric("Metrics stream disconnected.");
+    };
+
+    es.onmessage = messageHandler;
+    es.onerror = errorHandler;
+
+    return () => {
+      es.onmessage = null;
+      es.onerror = null;
+      try {
+        es.close();
+      } catch {
+        /* ignore */
+      }
+      if (metricsRef.current === es) metricsRef.current = null;
+    };
+  }, [open, sessionId]);
+
+  const workflowSteps = useMemo(() => {
+    // Group websocket events by heading (feature/event_type), keeping first-seen order.
+    // Each heading stores the latest status/message.
+    const byHeading = new Map<
+      string,
+      { heading: string; status?: string; text: string; lastId: number }
+    >();
+    const order: string[] = [];
+    for (const e of metricsEntries) {
+      const key = e.heading || "step";
+      if (!byHeading.has(key)) {
+        byHeading.set(key, { heading: key, status: e.status, text: e.text, lastId: e.id });
+        order.push(key);
+      } else {
+        const prev = byHeading.get(key)!;
+        byHeading.set(key, { ...prev, status: e.status, text: e.text, lastId: e.id });
+      }
+    }
+    return order
+      .map((k) => byHeading.get(k)!)
+      .filter((s) => s.heading && (s.text?.trim()?.length ?? 0) > 0);
+  }, [metricsEntries]);
+
+  const activeWorkflowHeading = useMemo(() => {
+    // Latest in_progress step wins.
+    for (let i = metricsEntries.length - 1; i >= 0; i--) {
+      const st = metricsEntries[i].status?.toLowerCase();
+      if (st === "in_progress" || st === "running") return metricsEntries[i].heading;
+    }
+    // Otherwise show the last heading we saw.
+    return metricsEntries.length ? metricsEntries[metricsEntries.length - 1].heading : undefined;
+  }, [metricsEntries]);
+
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+  }, [messages.length, recs?.length, followUps?.length]);
+
+  useEffect(() => {
+    if (busy) setThinkingExpanded(true);
+  }, [busy]);
+
+  const canSend = useMemo(() => input.trim().length > 0 && !busy, [input, busy]);
+  const isFirstUserTurn = useMemo(() => messages.filter((m) => m.role === "user").length === 0, [messages]);
+
+  const suggestedPrompts = useMemo(
+    () => [
+      { short: "Business assistance", full: "I’m a small business owner in NJ and I need business assistance." },
+      { short: "Funding", full: "I’m a startup founder looking for funding options (grants/loans) in NJ." },
+      { short: "Procurement", full: "I’m a vendor—how do I find procurement opportunities in NJ?" },
+      { short: "Innovation & tech", full: "I’m a tech startup and I need innovation & technology support (R&D, programs, incentives)." },
+      { short: "Tax credits & incentives", full: "I’m looking for incentives/tax credits for creating jobs or investing in NJ." },
+    ],
+    [],
+  );
+
+  const fabRef = useRef<HTMLDivElement | null>(null);
+
+  function onFabHandlePointerDown(e: React.PointerEvent<HTMLDivElement>) {
+    if (e.button !== 0) return;
+    const root = fabRef.current;
+    if (!root) return;
+    const rect = root.getBoundingClientRect();
+    root.style.right = "auto";
+    root.style.bottom = "auto";
+    root.style.left = `${Math.max(0, Math.min(window.innerWidth - rect.width, rect.left))}px`;
+    root.style.top = `${Math.max(0, Math.min(window.innerHeight - rect.height, rect.top))}px`;
+    let px = e.clientX;
+    let py = e.clientY;
+    const onMove = (ev: PointerEvent) => {
+      ev.preventDefault();
+      const dx = ev.clientX - px;
+      const dy = ev.clientY - py;
+      px = ev.clientX;
+      py = ev.clientY;
+      const l = root.offsetLeft + dx;
+      const t = root.offsetTop + dy;
+      const nl = Math.max(0, Math.min(window.innerWidth - root.offsetWidth, l));
+      const nt = Math.max(0, Math.min(window.innerHeight - root.offsetHeight, t));
+      root.style.left = `${nl}px`;
+      root.style.top = `${nt}px`;
+    };
+    const onUp = () => {
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onUp);
+      document.removeEventListener("pointercancel", onUp);
+    };
+    document.addEventListener("pointermove", onMove, { passive: false });
+    document.addEventListener("pointerup", onUp);
+    document.addEventListener("pointercancel", onUp);
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function formatContextBits(profile: ApiResponse["userProfile"] | null): string[] {
+    const contextBits: string[] = [];
+    if (profile?.persona) contextBits.push(`persona=${profile.persona}`);
+    if (profile?.needs?.length) contextBits.push(`needs=${profile.needs.join(",")}`);
+    if (profile?.stage) contextBits.push(`stage=${profile.stage}`);
+    if (profile?.location) contextBits.push(`location=${profile.location}`);
+    if (profile?.industry?.length && profile.industry[0] !== "Unknown") {
+      contextBits.push(`industry=${profile.industry.join(",")}`);
+    }
+    return contextBits;
+  }
+
+  async function send(override?: string) {
+    const raw = (override ?? input).trim();
+    if (!raw || busy) return;
+    const content = raw;
+    setInput("");
+    setBusy(true);
+    setSlow(false);
+    setRecs(null);
+    setFollowUps(null);
+    metricIdRef.current = 0;
+    setMetricsEntries([]);
+    setPipeline((p) => ({
+      understand: { done: false, active: true },
+      retrieve: { ...p.retrieve, done: false, active: false },
+      rank: { ...p.rank, done: false, active: false },
+      followups: { ...p.followups, done: false, active: false },
+      format: { ...p.format, done: false, active: false },
+    }));
+    setMessages((m) => [...m, { role: "user", content }]);
+
+    try {
+      const t = window.setTimeout(() => setSlow(true), 1200);
+      const contextBits = formatContextBits(userProfile);
+      const firstTurnGuidance = isFirstUserTurn
+        ? [
+            "Conversation policy for this session:",
+            "- On the first response, ask 2–3 targeted follow-up questions based on the user's query.",
+            "- Do NOT ask for persona/need/stage/location if the user already stated them in the query.",
+            "- Do NOT recommend programs until after the user answers the follow-up questions.",
+            "- Keep follow-up questions non-redundant and specific (e.g., amount, timeline, county, eligibility constraint).",
+          ].join("\n")
+        : "";
+      const messageToSend =
+        [
+          content,
+          firstTurnGuidance ? `\n\n${firstTurnGuidance}` : "",
+          contextBits.length > 0 ? `\n\nContext (already provided): ${contextBits.join(" | ")}` : "",
+        ]
+          .join("")
+          .trim();
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: messageToSend, sessionId }),
+      });
+      const data = (await res.json()) as ApiResponse;
+      window.clearTimeout(t);
+
+      if (!data.ok && data.error) {
+        setMessages((m) => [
+          ...m,
+          {
+            role: "assistant",
+            content: `I hit an issue calling the advisor service: ${data.error}`,
+          },
+        ]);
+        return;
+      }
+
+      const assistantText = typeof data.assistantText === "string" ? data.assistantText : "";
+      const trimmedAssistant = assistantText.trim();
+      if (trimmedAssistant.length > 0) {
+        setMessages((m) => [...m, { role: "assistant", content: trimmedAssistant }]);
+      } else if (!data.followUps?.length) {
+        // No follow-up buttons: show a short assistant line when we have recs or as fallback.
+        setMessages((m) => [
+          ...m,
+          {
+            role: "assistant",
+            content: data.recommendations?.length
+              ? "Here are the best-matching NJEDA programs based on what you shared."
+              : "Here are the best-matching NJEDA programs I found based on what you shared.",
+          },
+        ]);
+      }
+
+      if (data.userProfile) {
+        setUserProfile(data.userProfile);
+      } else {
+        setUserProfile(null);
+      }
+
+      if (data.followUps?.length) {
+        setFollowUps(data.followUps.slice(0, 8));
+      }
+
+      if (data.recommendations?.length) {
+        // Only show the top 3 programs in the "final" state.
+        setRecs(data.recommendations.slice(0, 3));
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Unknown error";
+      setMessages((m) => [
+        ...m,
+        { role: "assistant", content: `Something went wrong: ${msg}` },
+      ]);
+    } finally {
+      setBusy(false);
+      setSlow(false);
+      setPipeline((p) => ({
+        understand: { ...p.understand, active: false },
+        retrieve: { ...p.retrieve, active: false },
+        rank: { ...p.rank, active: false },
+        followups: { ...p.followups, active: false },
+        format: { ...p.format, active: false },
+      }));
+    }
+  }
+
+  return (
+    <>
+      {variant === "floating" ? (
+        <div
+          ref={fabRef}
+          className="fixed bottom-6 right-6 z-50 flex items-center gap-1.5"
+        >
+          <div
+            role="button"
+            tabIndex={0}
+            aria-label="Drag Program Advisor"
+            title="Drag"
+            onPointerDown={onFabHandlePointerDown}
+            className="flex h-11 w-6 cursor-grab select-none items-center justify-center rounded-xl bg-[#0F7C8C]/35 text-xs font-bold tracking-tighter text-white shadow-md active:cursor-grabbing"
+          >
+            ⋮⋮
+          </div>
+          <button
+            type="button"
+            onClick={() => setOpen(true)}
+            className="rounded-full bg-[#0F7C8C] text-white shadow-lg hover:bg-[#0d6a78] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[#0F7C8C]"
+          >
+            <span className="flex items-center gap-2 px-4 py-3 text-sm font-semibold">
+              <span className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-white/15">
+                <span className="text-base leading-none">💬</span>
+              </span>
+              Program Advisor
+            </span>
+          </button>
+        </div>
+      ) : null}
+
+      {open ? (
+        <div
+          className={cn(
+            "fixed inset-0 z-50 flex items-end justify-center bg-black/40 p-4 sm:items-center",
+            variant === "panel" && "bg-transparent p-0 sm:p-0",
+          )}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div
+            className={cn(
+              "flex w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl sm:max-w-3xl",
+              variant === "panel"
+                ? "h-[100dvh] max-h-[100dvh] max-w-none rounded-none shadow-none"
+                : "h-[min(88dvh,860px)] max-h-[min(92dvh,900px)]",
+            )}
+          >
+            <div className="flex shrink-0 items-center justify-between border-b px-5 py-3">
+              <div>
+                <div className="text-sm font-semibold text-slate-900">Program Advisor</div>
+                <div className="text-xs text-slate-500">
+                  Program recommendations grounded to NJEDA.gov
+                </div>
+              </div>
+              <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+                {variant === "floating" ? (
+                  <button
+                    type="button"
+                    onClick={() => setShowBehind((v) => !v)}
+                    className="rounded-lg border px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                  >
+                    {showBehind ? "Hide" : "Behind the scenes"}
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMessages([]);
+                    setRecs(null);
+                    setFollowUps(null);
+                    setUserProfile(null);
+                    setSessionId(newSessionId());
+                  }}
+                  className="rounded-lg border px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                >
+                  New session
+                </button>
+                {variant === "floating" ? (
+                  <button
+                    type="button"
+                    onClick={() => setOpen(false)}
+                    className="rounded-lg border px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                  >
+                    Close
+                  </button>
+                ) : null}
+              </div>
+            </div>
+
+            {variant === "floating" && showBehind ? (
+              <div className="max-h-[min(40vh,220px)] shrink-0 overflow-y-auto border-b bg-slate-50/80 px-5 py-4">
+                <div className="flex items-center justify-between">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Agent pipeline
+                  </div>
+                  <div className="text-xs text-slate-500">
+                    {busy ? (slow ? "Working…" : "Running…") : "Idle"}
+                  </div>
+                </div>
+                <div className="mt-3 space-y-2 text-sm">
+                  {(
+                    [
+                      { id: "understand", title: "Understand request" },
+                      { id: "retrieve", title: "Retrieve NJEDA knowledge" },
+                      { id: "rank", title: "Score & rank programs" },
+                      { id: "followups", title: "Generate follow-up questions" },
+                      { id: "format", title: "Format results as cards" },
+                    ] satisfies PipelineStep[]
+                  ).map((s) => (
+                    <div key={s.title} className="flex items-center gap-2">
+                      <span
+                        className={cn(
+                          "inline-flex h-5 w-5 items-center justify-center rounded-full text-xs font-bold",
+                          pipeline[s.id].done
+                            ? "bg-emerald-100 text-emerald-700"
+                            : pipeline[s.id].active
+                              ? "bg-cyan-100 text-cyan-800"
+                              : "bg-slate-100 text-slate-600",
+                        )}
+                      >
+                        {pipeline[s.id].done ? "✓" : pipeline[s.id].active ? "…" : "•"}
+                      </span>
+                      <span className="text-slate-800">{s.title}</span>
+                    </div>
+                  ))}
+                </div>
+                {lastMetric ? (
+                  <div className="mt-3 rounded-xl border border-slate-200 bg-white/70 p-2 text-[11px] text-slate-600">
+                    <div className="font-semibold text-slate-700">Latest metric</div>
+                    <div className="mt-1 whitespace-pre-wrap break-words">{lastMetric}</div>
+                  </div>
+                ) : (
+                  <div className="mt-3 text-xs text-slate-500">Waiting for live metrics…</div>
+                )}
+              </div>
+            ) : null}
+
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                {messages.filter((m) => m.role === "user").length === 0 ? (
+                  <div className="max-h-[38vh] shrink-0 overflow-y-auto border-b bg-gradient-to-b from-slate-50 to-white px-4 py-3 md:max-h-none">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                      Start with a topic
+                    </p>
+                    <p className="mt-1 text-sm text-slate-600">
+                      Tap a prompt below — it sends automatically.
+                    </p>
+                    <div className="mt-3 flex flex-col gap-2">
+                      {suggestedPrompts.map((p) => (
+                        <button
+                          key={p.full}
+                          type="button"
+                          onClick={() => send(p.full)}
+                          className="w-full rounded-xl border border-slate-200/80 bg-white px-3 py-2.5 text-left text-sm font-medium text-slate-800 shadow-sm transition hover:border-[#0F7C8C]/40 hover:bg-cyan-50/90 focus:outline-none focus:ring-2 focus:ring-[#0F7C8C]/30 disabled:opacity-50"
+                          disabled={busy}
+                        >
+                          <span className="text-xs font-semibold text-[#0F7C8C]">{p.short}</span>
+                          <span className="mt-0.5 block text-xs font-normal leading-snug text-slate-600">
+                            {p.full}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+                <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto bg-white p-4">
+                  <div className="space-y-3">
+                    {messages.map((m, idx) => (
+                      <div
+                        key={idx}
+                        className={cn(
+                          "flex",
+                          m.role === "user" ? "justify-end" : "justify-start",
+                        )}
+                      >
+                        <div
+                          className={cn(
+                            "max-w-[92%] whitespace-pre-wrap break-words rounded-2xl px-3 py-2 text-sm leading-6",
+                            m.role === "user"
+                              ? "bg-[#0B2E4D] text-white"
+                              : "bg-slate-100 text-slate-900",
+                          )}
+                        >
+                          {m.content}
+                        </div>
+                      </div>
+                    ))}
+
+                    {busy && variant !== "panel" ? (
+                      <div className="flex w-full max-w-full justify-start">
+                        <div className="w-full max-w-full overflow-hidden rounded-2xl border border-slate-200/90 bg-white shadow-sm">
+                          <button
+                            type="button"
+                            onClick={() => setThinkingExpanded((v) => !v)}
+                            className="flex w-full items-center justify-between gap-2 px-3 py-2.5 text-left hover:bg-slate-50/90"
+                          >
+                            <span className="flex min-w-0 flex-1 items-center gap-2 text-sm text-slate-800">
+                              <span className="shrink-0" aria-hidden>
+                                {slow ? "⏳" : "⚙️"}
+                              </span>
+                              <span className="min-w-0 font-semibold">
+                                {slow ? "Still working on this…" : "Behind the scenes"}
+                              </span>
+                              <span className="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold tabular-nums text-slate-600">
+                                {metricsEntries.length}
+                              </span>
+                            </span>
+                            <span className="shrink-0 text-slate-400" aria-hidden>
+                              {thinkingExpanded ? "▾" : "▸"}
+                            </span>
+                          </button>
+                          {thinkingExpanded ? (
+                            <div className="max-h-[min(40vh,280px)] space-y-1.5 overflow-y-auto border-t border-slate-100 px-3 py-2">
+                              {metricsEntries.length === 0 ? (
+                                <p className="text-xs text-slate-500">
+                                  Live steps from the metrics stream will appear here. Pipeline status below updates
+                                  while the agent runs.
+                                </p>
+                              ) : (
+                                metricsEntries.map((e) => (
+                                  <div
+                                    key={e.id}
+                                    className="flex gap-2 border-b border-slate-50 pb-1.5 text-xs leading-snug text-slate-700 last:border-0 last:pb-0"
+                                  >
+                                    <span className="shrink-0 pt-0.5" aria-hidden>
+                                      {metricGlyph(e.tag)}
+                                    </span>
+                                    <span className="min-w-0 flex-1">
+                                      {e.text}
+                                      {e.tag ? (
+                                        <span className="ml-2 inline-block rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-slate-500">
+                                          {e.tag}
+                                        </span>
+                                      ) : null}
+                                    </span>
+                                  </div>
+                                ))
+                              )}
+                              <div className="mt-2 border-t border-dashed border-slate-100 pt-2">
+                                <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+                                  NJEDA pipeline
+                                </p>
+                                <div className="space-y-1">
+                                  {(
+                                    [
+                                      { id: "understand", title: "Understand request" },
+                                      { id: "retrieve", title: "Retrieve NJEDA knowledge" },
+                                      { id: "rank", title: "Score & rank programs" },
+                                      { id: "followups", title: "Follow-up questions" },
+                                      { id: "format", title: "Format results" },
+                                    ] as const
+                                  ).map((s) => (
+                                    <div key={s.id} className="flex items-center gap-2 text-[11px] text-slate-600">
+                                      <span
+                                        className={cn(
+                                          "inline-flex h-4 w-4 items-center justify-center rounded-full text-[9px] font-bold",
+                                          pipeline[s.id].done
+                                            ? "bg-emerald-100 text-emerald-700"
+                                            : pipeline[s.id].active
+                                              ? "bg-cyan-100 text-cyan-800"
+                                              : "bg-slate-100 text-slate-500",
+                                        )}
+                                      >
+                                        {pipeline[s.id].done ? "✓" : pipeline[s.id].active ? "…" : "•"}
+                                      </span>
+                                      <span>{s.title}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            </div>
+                          ) : null}
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {followUps?.length ? (
+                      <div className="rounded-2xl border border-[#0F7C8C]/25 bg-gradient-to-b from-cyan-50/40 to-white p-3">
+                        <div className="text-xs font-semibold uppercase tracking-wide text-[#0B2E4D]">
+                          Quick replies
+                        </div>
+                        <p className="mt-1 text-xs text-slate-600">
+                          Tap an option to send it, or type your own answer below.
+                        </p>
+                        <div className="mt-3 flex flex-col gap-2">
+                          {followUps.map((q, i) => (
+                            <button
+                              key={`${q.slice(0, 48)}-${i}`}
+                              type="button"
+                              disabled={busy}
+                              onClick={() => {
+                                void send(q);
+                              }}
+                              className="w-full rounded-xl border border-slate-200/90 bg-white px-3 py-2.5 text-left text-sm font-medium leading-snug text-slate-800 shadow-sm transition hover:border-[#0F7C8C]/50 hover:bg-cyan-50/80 focus:outline-none focus:ring-2 focus:ring-[#0F7C8C]/30 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              {q}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {recs?.length && !followUps?.length ? (
+                      <div className="flex justify-start">
+                        <div className="w-full max-w-full rounded-2xl border border-slate-200/80 bg-slate-50/50 p-3">
+                          <ProgramRecCards recs={recs} />
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+
+                <div className="shrink-0 border-t p-3">
+                  <div className="flex gap-2">
+                    <textarea
+                      value={input}
+                      onChange={(e) => setInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
+                          send();
+                        }
+                      }}
+                      placeholder={
+                        followUps?.length
+                          ? "Or type your own answer…"
+                          : "Ask about programs, eligibility, funding…"
+                      }
+                      rows={1}
+                      className="flex-1 resize-none rounded-xl border bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 outline-none focus:ring-2 focus:ring-[#0B2E4D]/30 disabled:bg-slate-50"
+                      disabled={busy}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void send();
+                      }}
+                      disabled={!canSend}
+                      className={cn(
+                        "rounded-xl px-4 py-2 text-sm font-semibold text-white",
+                        canSend ? "bg-[#0B2E4D] hover:bg-[#0a2741]" : "bg-slate-300",
+                      )}
+                    >
+                      Send
+                    </button>
+                  </div>
+                  <div className="mt-2 text-xs text-slate-500">
+                    Tip: include business type, NJ location, stage, and what you need. (Shift+Enter for a new line.)
+                  </div>
+                </div>
+              </div>
+          </div>
+      ) : null}
+    </>
+  );
+}
+
