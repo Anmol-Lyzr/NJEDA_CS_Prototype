@@ -39,7 +39,7 @@
       width: "22px",
       minHeight: "44px",
       borderRadius: "12px",
-      background: "rgba(15,124,140,0.35)",
+      background: "rgba(0,65,90,0.35)",
       cursor: "grab",
       flexShrink: "0",
       display: "flex",
@@ -66,10 +66,10 @@
       padding: "10px 14px",
       borderRadius: "999px",
       border: "0",
-      background: "#0F7C8C",
+      background: "#002b41",
       color: "#fff",
       cursor: "pointer",
-      boxShadow: "0 10px 25px rgba(0,0,0,0.18)",
+      boxShadow: "0 10px 25px rgba(0,43,65,0.25)",
       fontWeight: "700",
       fontSize: "14px",
       lineHeight: "20px",
@@ -86,13 +86,15 @@
       width: "36px",
       height: "36px",
       borderRadius: "999px",
-      background: "rgba(255,255,255,0.18)",
+      background: "rgba(168,207,69,0.2)",
       display: "inline-flex",
       alignItems: "center",
       justifyContent: "center",
-      fontSize: "16px",
+      fontSize: "14px",
+      fontWeight: "700",
+      color: "#a8cf45",
     });
-    iconWrap.textContent = "💬";
+    iconWrap.textContent = "NJ";
 
     var label = el("span", { text: "Program Advisor" });
     button.appendChild(iconWrap);
@@ -192,10 +194,10 @@
     var close = el("button", { type: "button", "aria-label": "Close Program Advisor" });
     Object.assign(close.style, {
       position: "absolute",
-      top: "10px",
-      right: "10px",
+      top: "14px",
+      right: "14px",
       width: "38px",
-      height: "38px",
+      height: "35px",
       borderRadius: "10px",
       border: "1px solid rgba(0,0,0,0.10)",
       background: "#fff",

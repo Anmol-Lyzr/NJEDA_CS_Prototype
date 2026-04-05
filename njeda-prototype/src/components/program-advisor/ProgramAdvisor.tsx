@@ -57,6 +57,12 @@ function cn(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(" ");
 }
 
+/** NJEDA-inspired chrome (UI only). */
+const NJ_NAVY = "#002b41";
+const NJ_TEAL = "#00415a";
+const NJ_LIME = "#a8cf45";
+const NJ_USER_BUBBLE = "#0B2E4D";
+
 function looksLikeJsonObjectString(s: string): boolean {
   const t = s.trim();
   return t.length > 2 && t.startsWith("{") && t.endsWith("}");
@@ -161,7 +167,7 @@ function extractMetricMetaPayload(j: Record<string, unknown>): MetricMetaRow[] {
   const add = (label: string, raw: unknown) => {
     if (raw === undefined || raw === null) return;
     if (isSensitiveMetricKey(label)) return;
-    let s =
+    const s =
       typeof raw === "string"
         ? raw.trim()
         : typeof raw === "number" && Number.isFinite(raw)
@@ -459,6 +465,26 @@ function IconBolt({ className }: { className?: string }) {
   );
 }
 
+function IconSearch({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} aria-hidden>
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z"
+      />
+    </svg>
+  );
+}
+
+function IconSend({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.75} aria-hidden>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M6 12L3.269 3.125A59.769 59.769 0 0121.485 12 59.768 59.768 0 013.27 20.875L5.999 12zm0 0h7.5" />
+    </svg>
+  );
+}
+
 function IconCylinder({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} aria-hidden>
@@ -505,21 +531,21 @@ function IconChevron({ className, down }: { className?: string; down?: boolean }
 function stepRowIconForHeading(heading: string): ReactNode {
   const h = heading.toLowerCase();
   if (h.includes("knowledge") || h.includes("retrieve")) {
-    return <IconCylinder className="h-3.5 w-3.5 text-slate-500" />;
+    return <IconSearch className="h-3.5 w-3.5 text-stone-500" />;
   }
   if (h.includes("memory")) {
-    return <IconCylinder className="h-3.5 w-3.5 text-slate-500" />;
+    return <IconCylinder className="h-3.5 w-3.5 text-stone-500" />;
   }
   if (h.includes("tool")) {
-    return <IconWrench className="h-3.5 w-3.5 text-slate-500" />;
+    return <IconWrench className="h-3.5 w-3.5 text-stone-500" />;
   }
   if (h.includes("llm") || h.includes("generation")) {
-    return <IconSparkles className="h-3.5 w-3.5 text-[#0F7C8C]" />;
+    return <IconSparkles className="h-3.5 w-3.5 text-amber-700/80" />;
   }
   if (h.includes("start")) {
-    return <IconBolt className="h-3.5 w-3.5 text-amber-500" />;
+    return <IconBolt className="h-3.5 w-3.5 text-amber-600" />;
   }
-  return <IconSparkles className="h-3.5 w-3.5 text-slate-400" />;
+  return <IconSparkles className="h-3.5 w-3.5 text-stone-400" />;
 }
 
 /** Drop agent-style numbered questionnaire tails (e.g. lines starting with `1.`) so we can show one question per bubble. */
@@ -801,21 +827,22 @@ function newSessionId(): string {
 function ProgramRecCards({ recs }: { recs: ProgramRecommendation[] }) {
   return (
     <div className="space-y-3">
-      <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-        Recommended programs
-      </div>
+      <div className="text-xs font-semibold uppercase tracking-wide text-[#00415a]">Recommended programs</div>
       <div className="flex flex-col gap-4">
         {recs.map((r, idx) => (
           <article
             key={`${r.program_url}-${idx}`}
-            className="group overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm transition-shadow hover:shadow-md"
+            className="group overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm transition-shadow hover:border-[#002b41]/20 hover:shadow-md"
           >
             <div className="border-b border-slate-100 bg-gradient-to-r from-slate-50 to-white p-4">
               <div className="flex items-start justify-between gap-3">
                 <div>
                   <div className="text-sm font-semibold text-slate-900">{r.title}</div>
                   {r.benefit_type ? (
-                    <div className="mt-2 inline-flex items-center rounded-full bg-[#0F7C8C]/10 px-2 py-1 text-xs font-semibold text-[#0F7C8C]">
+                    <div
+                      className="mt-2 inline-flex items-center rounded-full px-2 py-1 text-xs font-semibold"
+                      style={{ backgroundColor: `${NJ_LIME}2e`, color: NJ_TEAL }}
+                    >
                       {humanizeBenefitType(r.benefit_type)}
                     </div>
                   ) : null}
@@ -933,13 +960,15 @@ function AgentOrchestrationPanel({
   activeHeading?: string;
   sessionId?: string;
 }) {
-  const headerTitle = orchestrationDone
-    ? "I've completed your request"
-    : slow
-      ? "Still working on it — thanks for your patience"
-      : "Working on your request";
-
   const stepCount = steps.length;
+  const headerTitle =
+    orchestrationDone && stepCount > 0
+      ? `● ${stepCount} step${stepCount === 1 ? "" : "s"} completed`
+      : orchestrationDone
+        ? "I've completed your request"
+        : slow
+          ? "Still working on it — thanks for your patience"
+          : "Working on your request";
 
   const activeIdx =
     orchestrationDone || steps.length === 0
@@ -953,27 +982,27 @@ function AgentOrchestrationPanel({
 
   return (
     <div className="flex justify-start">
-      <div className="w-full max-w-[92%] overflow-hidden rounded-2xl border border-slate-200/70 bg-[#FAFAF8] shadow-sm">
+      <div className="w-full max-w-[92%] overflow-hidden rounded-2xl border border-stone-200/80 bg-[#FAF7F2] shadow-sm">
         <button
           type="button"
           onClick={onToggleExpanded}
-          className="flex w-full items-center gap-2.5 rounded-full border border-slate-200/80 bg-white px-3.5 py-2.5 text-left shadow-[0_1px_0_rgba(15,23,42,0.04)] transition hover:bg-slate-50/90"
+          className="flex w-full items-center gap-2.5 rounded-xl border border-stone-200/70 bg-[#EDE8DF] px-3.5 py-2.5 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.65)] transition hover:bg-[#E8E2D8]"
         >
-          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-600">
-            <IconWrench className="h-4 w-4" />
+          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-stone-200/80 text-stone-600">
+            <IconBolt className="h-4 w-4" />
           </span>
           <span className="min-w-0 flex-1">
-            <span className="line-clamp-1 text-[13px] font-medium leading-snug text-slate-800">{headerTitle}</span>
+            <span className="line-clamp-2 text-[13px] font-medium leading-snug text-stone-800">{headerTitle}</span>
           </span>
-          {stepCount > 0 ? (
-            <span className="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold tabular-nums text-slate-600">
+          {stepCount > 0 && !(orchestrationDone && stepCount > 0) ? (
+            <span className="shrink-0 rounded-full bg-stone-200/90 px-2 py-0.5 text-[11px] font-semibold tabular-nums text-stone-600">
               {stepCount}
             </span>
           ) : null}
-          <span className="flex shrink-0 items-center gap-1.5 text-slate-400">
+          <span className="flex shrink-0 items-center gap-1.5 text-stone-500">
             <IconChevron className="h-4 w-4" down={orchestrationExpanded} />
             {orchestrationDone ? (
-              <span className="flex h-7 w-7 items-center justify-center rounded-full bg-emerald-50 text-emerald-600">
+              <span className="flex h-7 w-7 items-center justify-center rounded-full bg-emerald-100/90 text-emerald-700">
                 <IconCheck className="h-4 w-4" />
               </span>
             ) : null}
@@ -985,7 +1014,7 @@ function AgentOrchestrationPanel({
             {steps.length ? (
               <div className="relative pl-2">
                 <div
-                  className="absolute bottom-2 left-[15px] top-2 w-px bg-gradient-to-b from-slate-200 via-slate-200 to-transparent"
+                  className="absolute bottom-2 left-[15px] top-2 w-px bg-gradient-to-b from-stone-300/90 via-stone-200 to-transparent"
                   aria-hidden
                 />
                 <ul className="space-y-0">
@@ -999,18 +1028,18 @@ function AgentOrchestrationPanel({
                         <div className="relative z-[1] flex shrink-0 flex-col items-center">
                           <span
                             className={cn(
-                              "flex h-7 w-7 items-center justify-center rounded-full border bg-white shadow-sm",
-                              isDone && "border-emerald-200 bg-emerald-50",
-                              isActive && "border-[#0F7C8C]/40 bg-cyan-50/80",
-                              isPending && "border-slate-200 bg-slate-50/80",
+                              "flex h-7 w-7 items-center justify-center rounded-full border bg-[#FFFCF8] shadow-sm",
+                              isDone && "border-emerald-200/90 bg-emerald-50/90",
+                              isActive && "border-amber-300/80 bg-amber-50/90",
+                              isPending && "border-stone-200 bg-stone-50/90",
                             )}
                           >
                             {isDone ? (
-                              <IconCheck className="h-3.5 w-3.5 text-emerald-600" />
+                              <IconCheck className="h-3.5 w-3.5 text-emerald-700" />
                             ) : isActive ? (
                               <span className="relative flex h-2 w-2">
-                                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[#0F7C8C]/40" />
-                                <span className="relative inline-flex h-2 w-2 rounded-full bg-[#0F7C8C]" />
+                                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400/50" />
+                                <span className="relative inline-flex h-2 w-2 rounded-full bg-amber-600" />
                               </span>
                             ) : (
                               <span className={cn(isPending && "opacity-50")}>{stepRowIconForHeading(s.key)}</span>
@@ -1018,21 +1047,21 @@ function AgentOrchestrationPanel({
                           </span>
                         </div>
                         <div className="min-w-0 flex-1 pt-0.5">
-                          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-                            <span className="text-[13px] font-semibold text-slate-900">{s.title}</span>
+                          <div className="flex items-start justify-between gap-2">
+                            <span className="min-w-0 text-[13px] font-semibold text-stone-900">{s.title}</span>
                             {s.tag ? (
-                              <span className="rounded-full bg-slate-100/90 px-2 py-0.5 text-[10px] font-medium capitalize text-slate-500">
+                              <span className="shrink-0 rounded-full border border-stone-200/80 bg-stone-100/80 px-2 py-0.5 text-[10px] font-medium capitalize text-stone-500">
                                 {s.tag}
                               </span>
                             ) : null}
                           </div>
-                          <p className="mt-0.5 text-[12px] leading-relaxed text-slate-600">{s.detail}</p>
+                          <p className="mt-0.5 text-[12px] leading-relaxed text-stone-600">{s.detail}</p>
                           {s.meta?.length ? (
-                            <dl className="mt-2 space-y-1 rounded-lg border border-slate-200/80 bg-white/80 px-2.5 py-2 text-[10px] leading-snug text-slate-600 shadow-[inset_0_1px_0_rgba(255,255,255,0.6)]">
+                            <dl className="mt-2 space-y-1 rounded-lg border border-stone-200/80 bg-white/90 px-2.5 py-2 text-[10px] leading-snug text-stone-600 shadow-[inset_0_1px_0_rgba(255,255,255,0.6)]">
                               {s.meta.map((row, mi) => (
                                 <div key={`${s.key}-${idx}-${mi}`} className="flex gap-2">
-                                  <dt className="w-[4.5rem] shrink-0 font-medium text-slate-500">{row.label}</dt>
-                                  <dd className="min-w-0 break-all font-mono text-[10px] text-slate-700">{row.value}</dd>
+                                  <dt className="w-[4.5rem] shrink-0 font-medium text-stone-500">{row.label}</dt>
+                                  <dd className="min-w-0 break-all font-mono text-[10px] text-stone-700">{row.value}</dd>
                                 </div>
                               ))}
                             </dl>
@@ -1044,26 +1073,26 @@ function AgentOrchestrationPanel({
                 </ul>
               </div>
             ) : (
-              <p className="px-3 py-2 text-[12px] text-slate-500">Waiting for agent steps…</p>
+              <p className="px-3 py-2 text-[12px] text-stone-500">Waiting for agent steps…</p>
             )}
             {sessionId ? (
               <div
                 className={cn(
-                  "border-t border-slate-200/80 px-1 pt-2.5 text-[10px] text-slate-500",
+                  "border-t border-stone-200/80 px-1 pt-2.5 text-[10px] text-stone-500",
                   steps.length ? "mt-3" : "mt-1",
                 )}
               >
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                   <span>
-                    <span className="font-semibold text-slate-600">Session</span>{" "}
-                    <code className="rounded bg-slate-100 px-1 py-0.5 font-mono text-slate-800">
+                    <span className="font-semibold text-stone-600">Session</span>{" "}
+                    <code className="rounded bg-stone-200/60 px-1 py-0.5 font-mono text-stone-800">
                       {truncateText(sessionId, 44)}
                     </code>
                   </span>
-                  <span className="text-slate-400">·</span>
+                  <span className="text-stone-400">·</span>
                   <span>Metrics: Lyzr Studio WebSocket (via server)</span>
-                  <span className="text-slate-400">·</span>
-                  <span className="text-slate-500">API keys stay on the server</span>
+                  <span className="text-stone-400">·</span>
+                  <span className="text-stone-500">API keys stay on the server</span>
                 </div>
               </div>
             ) : null}
@@ -1614,7 +1643,7 @@ export function ProgramAdvisor({ variant = "floating", defaultOpen = false }: Pr
 
   return (
     <>
-      {variant === "floating" ? (
+      {variant === "floating" && !open ? (
         <div
           ref={fabRef}
           className="fixed bottom-6 right-6 z-50 flex items-center gap-1.5"
@@ -1625,18 +1654,29 @@ export function ProgramAdvisor({ variant = "floating", defaultOpen = false }: Pr
             aria-label="Drag Program Advisor"
             title="Drag"
             onPointerDown={onFabHandlePointerDown}
-            className="flex h-11 w-6 cursor-grab select-none items-center justify-center rounded-xl bg-[#0F7C8C]/35 text-xs font-bold tracking-tighter text-white shadow-md active:cursor-grabbing"
+            className="flex h-11 w-6 cursor-grab select-none items-center justify-center rounded-xl text-xs font-bold tracking-tighter text-white shadow-md active:cursor-grabbing"
+            style={{ backgroundColor: `${NJ_TEAL}59` }}
           >
             ⋮⋮
           </div>
           <button
             type="button"
             onClick={() => setOpen(true)}
-            className="rounded-full bg-[#0F7C8C] text-white shadow-lg hover:bg-[#0d6a78] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[#0F7C8C]"
+            className="rounded-full text-white shadow-lg transition focus:outline-none focus:ring-2 focus:ring-offset-2"
+            style={{ backgroundColor: NJ_NAVY, boxShadow: "0 10px 25px rgba(0,43,65,0.25)" }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.backgroundColor = NJ_TEAL;
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.backgroundColor = NJ_NAVY;
+            }}
           >
             <span className="flex items-center gap-2 px-4 py-3 text-sm font-semibold">
-              <span className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-white/15">
-                <span className="text-base leading-none">💬</span>
+              <span
+                className="inline-flex h-9 w-9 items-center justify-center rounded-full text-sm font-bold"
+                style={{ backgroundColor: `${NJ_LIME}33`, color: NJ_LIME }}
+              >
+                NJ
               </span>
               Program Advisor
             </span>
@@ -1647,28 +1687,44 @@ export function ProgramAdvisor({ variant = "floating", defaultOpen = false }: Pr
       {open ? (
         <div
           className={cn(
-            "fixed inset-0 z-50 flex items-end justify-center bg-black/40 p-4 sm:items-center",
-            variant === "panel" && "bg-transparent p-0 sm:p-0",
+            "z-50",
+            variant === "floating"
+              ? "pointer-events-none fixed inset-0 bg-black/15"
+              : "fixed inset-0 flex items-end justify-center bg-black/40 p-4 sm:items-center",
+            variant === "panel" && "items-stretch justify-stretch bg-transparent p-0 sm:items-stretch sm:justify-stretch sm:p-0",
           )}
           role="dialog"
           aria-modal="true"
         >
           <div
             className={cn(
-              "flex w-full max-w-5xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl",
-              variant === "panel"
-                ? "h-[100dvh] max-h-[100dvh] max-w-none rounded-none shadow-none"
-                : "h-[min(85dvh,820px)] max-h-[min(92dvh,880px)]",
+              "pointer-events-auto flex flex-col overflow-hidden bg-white shadow-2xl",
+              variant === "floating" &&
+                "fixed bottom-6 right-6 h-[min(72dvh,640px)] max-h-[min(72dvh,640px)] w-[min(100vw-24px,420px)] rounded-[20px] border border-black/5 shadow-[0_24px_48px_rgba(0,43,65,0.18)]",
+              variant === "panel" &&
+                "h-[100dvh] max-h-[100dvh] min-h-0 w-full max-w-none rounded-none shadow-none",
+              variant !== "floating" &&
+                variant !== "panel" &&
+                "h-[min(85dvh,820px)] max-h-[min(92dvh,880px)] w-full max-w-5xl rounded-2xl",
             )}
           >
-            <div className="flex shrink-0 items-center justify-between border-b px-5 py-3">
-              <div>
-                <div className="text-sm font-semibold text-slate-900">Program Advisor</div>
-                <div className="text-xs text-slate-500">
+            <div
+              className="grid shrink-0 grid-cols-[minmax(0,1fr)_max-content] items-start gap-x-5 gap-y-2 px-4 py-3 sm:px-5"
+              style={{ backgroundColor: NJ_NAVY }}
+            >
+              <div className="min-w-0">
+                <div className="truncate text-[15px] font-bold tracking-tight text-white">
+                  NJEDA Program Advisor
+                </div>
+                <div className="mt-1 flex min-w-0 items-center gap-1.5 text-xs font-medium text-white/80">
+                  <span className="inline-block h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: NJ_LIME }} />
+                  <span className="truncate">Online</span>
+                </div>
+                <div className="mt-0.5 line-clamp-2 text-[11px] leading-snug text-white/55">
                   Program recommendations grounded to NJEDA.gov
                 </div>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex min-w-max shrink-0 items-center gap-6 self-start pt-0.5">
                 <button
                   type="button"
                   onClick={() => {
@@ -1680,17 +1736,24 @@ export function ProgramAdvisor({ variant = "floating", defaultOpen = false }: Pr
                     setUserProfile(null);
                     setSessionId(newSessionId());
                   }}
-                  className="rounded-lg border px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                  className="shrink-0 whitespace-nowrap rounded-lg border px-3 py-2 mr-[3rem] text-xs font-semibold shadow-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-white/40"
+                  style={{
+                    borderColor: `${NJ_LIME}aa`,
+                    backgroundColor: `${NJ_LIME}22`,
+                    color: NJ_LIME,
+                  }}
                 >
-                  New session
+                  New Session
                 </button>
                 {variant === "floating" ? (
                   <button
                     type="button"
                     onClick={() => setOpen(false)}
-                    className="rounded-lg border px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                    className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-white/25 bg-white text-xl font-light leading-none transition hover:bg-white/95"
+                    style={{ color: NJ_NAVY }}
+                    aria-label="Close"
                   >
-                    Close
+                    ×
                   </button>
                 ) : null}
               </div>
@@ -1699,20 +1762,18 @@ export function ProgramAdvisor({ variant = "floating", defaultOpen = false }: Pr
             <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
               <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
                 {messages.filter((m) => m.role === "user").length === 0 ? (
-                  <div className="max-h-[38vh] shrink-0 overflow-y-auto border-b bg-gradient-to-b from-slate-50 to-white px-4 py-3 md:max-h-none">
-                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                      Start with a topic
-                    </p>
+                  <div className="max-h-[38vh] shrink-0 overflow-y-auto border-b border-slate-200/60 bg-gradient-to-b from-slate-100/80 to-slate-50/90 px-4 py-3 md:max-h-none">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-[#00415a]">Start with a topic</p>
                     <div className="mt-3 flex flex-col gap-2">
                       {suggestedPrompts.map((p) => (
                         <button
                           key={p.full}
                           type="button"
                           onClick={() => void sendMessage({ backendText: p.full, displayText: p.full })}
-                          className="w-full rounded-xl border border-slate-200/80 bg-white px-3 py-2.5 text-left text-sm font-medium text-slate-800 shadow-sm transition hover:border-[#0F7C8C]/40 hover:bg-cyan-50/90 focus:outline-none focus:ring-2 focus:ring-[#0F7C8C]/30 disabled:opacity-50"
+                          className="w-full rounded-2xl border border-slate-200/90 bg-white px-3 py-2.5 text-left text-sm font-medium text-slate-800 shadow-sm transition hover:border-[#002b41]/35 hover:bg-[#a8cf45]/10 focus:outline-none focus:ring-2 focus:ring-[#002b41]/25 disabled:opacity-50"
                           disabled={busy}
                         >
-                          <span className="text-xs font-semibold text-[#0F7C8C]">{p.short}</span>
+                          <span className="text-xs font-semibold text-[#00415a]">{p.short}</span>
                           <span className="mt-0.5 block text-xs font-normal leading-snug text-slate-600">
                             {p.full}
                           </span>
@@ -1721,7 +1782,7 @@ export function ProgramAdvisor({ variant = "floating", defaultOpen = false }: Pr
                     </div>
                   </div>
                 ) : null}
-                <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto bg-white p-4">
+                <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto bg-slate-50 p-4">
                   <div className="space-y-3">
                     {messages.map((m, idx) => {
                       const lastIdx = messages.length - 1;
@@ -1745,17 +1806,27 @@ export function ProgramAdvisor({ variant = "floating", defaultOpen = false }: Pr
                           ) : null}
                           <div
                             className={cn(
-                              "flex",
+                              "flex gap-2",
                               m.role === "user" ? "justify-end" : "justify-start",
                             )}
                           >
+                            {m.role === "assistant" ? (
+                              <span
+                                className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[11px] font-bold text-white shadow-sm"
+                                style={{ backgroundColor: NJ_NAVY }}
+                                aria-hidden
+                              >
+                                NJ
+                              </span>
+                            ) : null}
                             <div
                               className={cn(
-                                "max-w-[92%] whitespace-pre-wrap break-words rounded-2xl px-3 py-2 text-sm leading-6",
+                                "max-w-[92%] whitespace-pre-wrap break-words px-3.5 py-2.5 text-sm leading-6",
                                 m.role === "user"
-                                  ? "bg-[#0B2E4D] text-white"
-                                  : "bg-slate-100 text-slate-900",
+                                  ? "rounded-[22px] text-white shadow-sm"
+                                  : "rounded-2xl border border-slate-200/80 bg-white text-slate-900 shadow-sm",
                               )}
+                              style={m.role === "user" ? { backgroundColor: NJ_USER_BUBBLE } : undefined}
                             >
                               {m.role === "assistant" ? safeUiAssistantLine(m.content) : m.content}
                             </div>
@@ -1779,8 +1850,8 @@ export function ProgramAdvisor({ variant = "floating", defaultOpen = false }: Pr
                     ) : null}
 
                     {structuredFollowUps?.length ? (
-                      <div className="rounded-2xl border bg-white p-3">
-                        <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                      <div className="rounded-2xl border border-slate-200/80 bg-white p-3 shadow-sm">
+                        <div className="text-xs font-semibold uppercase tracking-wide text-[#00415a]">
                           Quick questions
                         </div>
                         <div className="mt-3">
@@ -1830,7 +1901,7 @@ export function ProgramAdvisor({ variant = "floating", defaultOpen = false }: Pr
                                   setStructuredIdx(0);
                                   void submitFollowUpCompletion(nextLines);
                                 }}
-                                className="w-full rounded-xl border border-slate-200/90 bg-white px-3 py-2.5 text-left text-sm font-medium leading-snug text-slate-800 shadow-sm transition hover:border-[#0F7C8C]/50 hover:bg-cyan-50/80 focus:outline-none focus:ring-2 focus:ring-[#0F7C8C]/30 disabled:cursor-not-allowed disabled:opacity-50"
+                                className="w-full rounded-2xl border border-slate-200/90 bg-white px-3 py-2.5 text-left text-sm font-medium leading-snug text-slate-800 shadow-sm transition hover:border-[#002b41]/35 hover:bg-[#a8cf45]/10 focus:outline-none focus:ring-2 focus:ring-[#002b41]/25 disabled:cursor-not-allowed disabled:opacity-50"
                               >
                                 {c.label}
                               </button>
@@ -1842,7 +1913,7 @@ export function ProgramAdvisor({ variant = "floating", defaultOpen = false }: Pr
 
                     {recs?.length && !structuredFollowUps?.length ? (
                       <div className="flex justify-start">
-                        <div className="w-full max-w-full rounded-2xl border border-slate-200/80 bg-slate-50/50 p-3">
+                        <div className="w-full max-w-full rounded-2xl border border-slate-200/80 bg-white p-3 shadow-sm">
                           <ProgramRecCards recs={recs} />
                         </div>
                       </div>
@@ -1850,7 +1921,7 @@ export function ProgramAdvisor({ variant = "floating", defaultOpen = false }: Pr
                   </div>
                 </div>
 
-                <div className="shrink-0 border-t p-3">
+                <div className="shrink-0 border-t border-slate-200/80 bg-white p-3">
                   <div className="flex gap-2">
                     <textarea
                       value={input}
@@ -1861,9 +1932,9 @@ export function ProgramAdvisor({ variant = "floating", defaultOpen = false }: Pr
                           send();
                         }
                       }}
-                      placeholder="Ask about programs, eligibility, funding…"
+                      placeholder="Ask about NJ programs…"
                       rows={1}
-                      className="flex-1 resize-none rounded-xl border bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 outline-none focus:ring-2 focus:ring-[#0B2E4D]/30 disabled:bg-slate-50"
+                      className="min-h-[44px] flex-1 resize-none rounded-2xl border border-slate-200/90 bg-slate-50/80 px-3 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 outline-none focus:border-[#002b41]/30 focus:ring-2 focus:ring-[#002b41]/20 disabled:bg-slate-100"
                       disabled={busy}
                     />
                     <button
@@ -1873,11 +1944,14 @@ export function ProgramAdvisor({ variant = "floating", defaultOpen = false }: Pr
                       }}
                       disabled={!canSend}
                       className={cn(
-                        "rounded-xl px-4 py-2 text-sm font-semibold text-white",
-                        canSend ? "bg-[#0B2E4D] hover:bg-[#0a2741]" : "bg-slate-300",
+                        "flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl transition",
+                        canSend
+                          ? "bg-[#a8cf45] text-[#002b41] shadow-[0_2px_8px_rgba(0,43,65,0.12)] hover:brightness-95"
+                          : "cursor-not-allowed bg-slate-200 text-slate-400",
                       )}
+                      aria-label="Send message"
                     >
-                      Send
+                      <IconSend className="h-5 w-5" />
                     </button>
                   </div>
                   <div className="mt-2 text-xs text-slate-500">
