@@ -1617,7 +1617,7 @@ export function ProgramAdvisor({ variant = "floating", defaultOpen = false }: Pr
 
   const suggestedPrompts = useMemo(
     () => [
-      { short: "Business assistance", full: "I’m a small business owner in NJ and I need business assistance." },
+      { short: "Business assistance", full: "I’m a small business owner in NJ and I need assistance." },
       { short: "Funding", full: "I’m a startup founder looking for funding options (grants/loans) in NJ." },
       { short: "Procurement", full: "I’m a vendor—how do I find procurement opportunities in NJ?" },
       { short: "Innovation & tech", full: "I’m a tech startup and I need innovation & technology support (R&D, programs, incentives)." },
