@@ -961,14 +961,6 @@ function AgentOrchestrationPanel({
   sessionId?: string;
 }) {
   const stepCount = steps.length;
-  const headerTitle =
-    orchestrationDone && stepCount > 0
-      ? `● ${stepCount} step${stepCount === 1 ? "" : "s"} completed`
-      : orchestrationDone
-        ? "I've completed your request"
-        : slow
-          ? "Still working on it — thanks for your patience"
-          : "Working on your request";
 
   const activeIdx =
     orchestrationDone || steps.length === 0
@@ -980,11 +972,26 @@ function AgentOrchestrationPanel({
           })()
         : steps.length - 1;
 
+  const activeStep = activeIdx >= 0 ? steps[activeIdx] : undefined;
+  const collapsedSummaryLine =
+    orchestrationDone && stepCount > 0
+      ? `● ${stepCount} step${stepCount === 1 ? "" : "s"} completed`
+      : orchestrationDone
+        ? "I've completed your request"
+        : activeStep
+          ? slow
+            ? `Still working — ${activeStep.title}`
+            : activeStep.title
+          : slow
+            ? "Still working on it — thanks for your patience"
+            : "Working on your request";
+
   return (
     <div className="flex justify-start">
       <div className="w-full max-w-[92%] overflow-hidden rounded-2xl border border-stone-200/80 bg-[#FAF7F2] shadow-sm">
         <button
           type="button"
+          aria-expanded={orchestrationExpanded}
           onClick={onToggleExpanded}
           className="flex w-full items-center gap-2.5 rounded-xl border border-stone-200/70 bg-[#EDE8DF] px-3.5 py-2.5 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.65)] transition hover:bg-[#E8E2D8]"
         >
@@ -992,7 +999,9 @@ function AgentOrchestrationPanel({
             <IconBolt className="h-4 w-4" />
           </span>
           <span className="min-w-0 flex-1">
-            <span className="line-clamp-2 text-[13px] font-medium leading-snug text-stone-800">{headerTitle}</span>
+            <span className="line-clamp-1 text-[13px] font-medium leading-snug text-stone-800">
+              {collapsedSummaryLine}
+            </span>
           </span>
           {stepCount > 0 && !(orchestrationDone && stepCount > 0) ? (
             <span className="shrink-0 rounded-full bg-stone-200/90 px-2 py-0.5 text-[11px] font-semibold tabular-nums text-stone-600">
@@ -1132,7 +1141,7 @@ export function ProgramAdvisor({ variant = "floating", defaultOpen = false }: Pr
   const [lastMetric, setLastMetric] = useState<string | null>(null);
   const [metricsEntries, setMetricsEntries] = useState<MetricEntry[]>([]);
   const metricIdRef = useRef(0);
-  const [orchestrationExpanded, setOrchestrationExpanded] = useState(true);
+  const [orchestrationExpanded, setOrchestrationExpanded] = useState(false);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const metricsRef = useRef<EventSource | null>(null);
@@ -1549,7 +1558,7 @@ export function ProgramAdvisor({ variant = "floating", defaultOpen = false }: Pr
     setLastMetric(null);
     setMetricsEntries([]);
     metricIdRef.current = 0;
-    setOrchestrationExpanded(true);
+    setOrchestrationExpanded(false);
   }
 
   async function sendMessage(payload?: { backendText?: string; displayText?: string }) {
