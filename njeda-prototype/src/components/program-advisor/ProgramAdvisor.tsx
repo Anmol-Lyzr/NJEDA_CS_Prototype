@@ -1642,13 +1642,9 @@ export function ProgramAdvisor({ variant = "floating", defaultOpen = false }: Pr
       { label: "Real estate", sendAs: "Assistance type: real_estate" },
     ];
 
-    if (recs?.length) {
-      return [
-        ...categoryChips,
-        { label: "Refine by location", sendAs: "Refine by location" },
-        { label: "Start over", sendAs: "Start a new session" },
-      ];
-    }
+    // Once program recommendation cards are visible, hide suggestion chips to keep
+    // the results tab clean (the header already has New Session).
+    if (recs?.length) return [];
 
     // Default: after any assistant response, offer quick category pivots.
     return categoryChips;
