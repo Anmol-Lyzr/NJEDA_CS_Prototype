@@ -762,6 +762,33 @@ function normalizeUserProfile(value: unknown): UserProfile | undefined {
   };
 }
 
+function normalizeProgramUrl(raw: unknown): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  let t = raw.trim();
+  if (!t) return undefined;
+
+  // Strip surrounding quotes / trailing commas (common in malformed upstream payloads).
+  for (let i = 0; i < 3; i++) {
+    const strippedTrailingComma = t.endsWith(",") ? t.slice(0, -1).trimEnd() : t;
+    const strippedQuotes =
+      strippedTrailingComma.length >= 2 &&
+      strippedTrailingComma.startsWith('"') &&
+      strippedTrailingComma.endsWith('"')
+        ? strippedTrailingComma.slice(1, -1)
+        : strippedTrailingComma;
+    if (strippedQuotes === t) break;
+    t = strippedQuotes.trim();
+  }
+
+  // Normalize scheme-less URLs and relative paths.
+  if (/^https?:\/\//i.test(t)) return t;
+  if (t.startsWith("//")) return `https:${t}`;
+  if (/^www\./i.test(t)) return `https://${t}`;
+  if (t.startsWith("/")) return `https://www.njeda.gov${t}`;
+  if (t.includes("njeda.gov") && !t.startsWith("http")) return `https://${t.replace(/^\/+/, "")}`;
+  return t;
+}
+
 function normalizeRecommendations(value: unknown): ProgramRecommendation[] | undefined {
   if (!value) return;
   const obj = value as Record<string, unknown>;
@@ -772,15 +799,28 @@ function normalizeRecommendations(value: unknown): ProgramRecommendation[] | und
   for (const r of recs) {
     if (!r || typeof r !== "object") continue;
     const rr = r as Record<string, unknown>;
-    const title = typeof rr.title === "string" ? rr.title : undefined;
-    const program_url =
-      typeof rr.program_url === "string"
-        ? rr.program_url
-        : typeof rr.url === "string"
-          ? rr.url
-          : typeof rr.link === "string"
-            ? rr.link
+    const title =
+      typeof rr.title === "string"
+        ? rr.title
+        : typeof rr.name === "string"
+          ? rr.name
+          : typeof rr.program_title === "string"
+            ? rr.program_title
             : undefined;
+
+    const urlCandidate =
+      rr.program_url ??
+      rr.programUrl ??
+      rr.programURL ??
+      rr.program_link ??
+      rr.programLink ??
+      rr.program_page ??
+      rr.programPage ??
+      rr.url ??
+      rr.link;
+
+    const program_url = normalizeProgramUrl(urlCandidate);
+
     if (!title || !program_url) continue;
 
     normalized.push({
