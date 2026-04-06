@@ -431,6 +431,47 @@ function friendlyOrchestrationTitle(heading: string): string {
   return formatHeading(heading);
 }
 
+type CanonicalOrchestrationStageKey =
+  | "agent_started"
+  | "kb_fetched"
+  | "memory_saved"
+  | "generating_answer"
+  | "process_complete";
+
+const CANONICAL_ORCHESTRATION_STAGES: Array<{
+  key: CanonicalOrchestrationStageKey;
+  title: string;
+  defaultDetail: string;
+}> = [
+  { key: "agent_started", title: "Agent Started", defaultDetail: "Initializing your request" },
+  { key: "kb_fetched", title: "KB Fetched", defaultDetail: "Fetching relevant programs from the knowledge base" },
+  { key: "memory_saved", title: "Saved in Memory", defaultDetail: "Saving useful context for this session" },
+  { key: "generating_answer", title: "Generating Answer", defaultDetail: "Preparing a response tailored to your request" },
+  { key: "process_complete", title: "Working on your request", defaultDetail: "Wrapping up this turn" },
+];
+
+function canonicalStageFromHeading(heading: string): CanonicalOrchestrationStageKey | undefined {
+  const h = heading.toLowerCase();
+  if (
+    h.includes("agent_process_start") ||
+    h.includes("process_start") ||
+    h === "__start__" ||
+    h === "start"
+  ) {
+    return "agent_started";
+  }
+  if (h.includes("knowledge") || h.includes("retrieve") || h.includes("retrieval") || h.includes("kb")) {
+    return "kb_fetched";
+  }
+  if (h.includes("memory")) return "memory_saved";
+  if (h.includes("llm") || h.includes("generation") || h.includes("answer")) return "generating_answer";
+  // Only treat explicit end markers as completion (avoid false positives like "weekend", "backend", etc).
+  if (h.includes("agent_process_end") || h.includes("process_end") || h === "__end__" || h === "end") {
+    return "process_complete";
+  }
+  return undefined;
+}
+
 function orchestrationSubtleTag(heading: string): string | undefined {
   const h = heading.toLowerCase();
   if (h.includes("memory")) return "memory";
@@ -573,6 +614,21 @@ function assistantIntroAlreadyContainsFirstQuestion(introStripped: string, first
   return ni === nq || ni.endsWith(nq);
 }
 
+function removeTrailingQuestionFromIntro(intro: string, question: string): string {
+  const i = intro.trim();
+  const q = question.trim();
+  if (!i || !q) return i;
+  const ni = i.replace(/\s+/g, " ");
+  const nq = q.replace(/\s+/g, " ");
+  if (ni === nq) return "";
+  if (!ni.endsWith(nq)) return i;
+
+  // Remove the last occurrence (the trailing question), preserving any earlier intro text.
+  const idx = i.lastIndexOf(q);
+  if (idx >= 0) return i.slice(0, idx).trim();
+  return i;
+}
+
 function humanizeBenefitType(raw: string): string {
   const map: Record<string, string> = {
     grant: "Grant",
@@ -588,6 +644,48 @@ function humanizeBenefitType(raw: string): string {
   return t
     .replace(/_/g, " ")
     .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function humanizeUseCaseToken(token: string): string {
+  const t = token.trim();
+  if (!t) return "";
+  const cleaned = t
+    .replace(/[•·]/g, " ")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) return "";
+  return cleaned
+    .split(" ")
+    .map((w) => {
+      const ww = w.trim();
+      if (!ww) return "";
+      // Preserve short/all-caps tokens (e.g. NJ, SBA, R&D).
+      if (ww.toUpperCase() === ww && /[A-Z]/.test(ww)) return ww;
+      const lower = ww.toLowerCase();
+      return lower.charAt(0).toUpperCase() + lower.slice(1);
+    })
+    .filter(Boolean)
+    .join(" ");
+}
+
+function parseUseCaseList(raw: string): string[] {
+  const t = raw.trim();
+  if (!t) return [];
+  const parts = t
+    .split(/[,|\n;/]+/g)
+    .map((p) => humanizeUseCaseToken(p))
+    .filter((p) => p.length > 0);
+
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const p of parts) {
+    const k = p.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(p);
+  }
+  return out;
 }
 
 /** Options we no longer show (legacy model output may still include them). */
@@ -638,8 +736,101 @@ function parseNumberedChoicesFromFollowUp(q: string, idx: number): StructuredFol
   };
 }
 
+/** Also accept "- Option" / "• Option" follow-up formats. */
+function parseBulletedChoicesFromFollowUp(q: string, idx: number): StructuredFollowUp | null {
+  const lines = q.split(/\n/).map((l) => l.trim());
+  const choices: string[] = [];
+  const promptLines: string[] = [];
+
+  for (const line of lines) {
+    if (!line) continue;
+    const m = line.match(/^[-*•]\s+(.+)/);
+    if (m) {
+      const label = m[1].trim();
+      if (label) choices.push(label);
+    } else if (choices.length === 0) {
+      promptLines.push(line);
+    }
+  }
+
+  const filteredLabels = choices.filter((label) => !shouldOmitNumberedChoiceLabel(label));
+  if (filteredLabels.length < 2) return null;
+
+  const prompt =
+    promptLines.join("\n").trim() ||
+    "Please select one:";
+  const promptOneLine = promptLines.join(" ").replace(/\s+/g, " ").trim();
+
+  return {
+    id: `parsed_followup_${idx}`,
+    prompt,
+    choices: filteredLabels.map((label, i) => ({
+      label,
+      value: `parsed_${idx}_${i}`,
+      sendAs: promptOneLine ? `${promptOneLine} — ${label}` : label,
+    })),
+  };
+}
+
+/**
+ * Accept simple list formats like:
+ * Question?
+ * Funding
+ * Incentives
+ * Procurement
+ */
+function parsePlainLineChoicesFromFollowUp(q: string, idx: number): StructuredFollowUp | null {
+  const lines = q.split(/\n/).map((l) => l.trim()).filter(Boolean);
+  if (lines.length < 3) return null; // prompt + >=2 options
+
+  // Find first likely option line: after we see the first non-empty prompt line,
+  // treat subsequent short lines as options (bounded).
+  const promptLines: string[] = [];
+  const choices: string[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? "";
+    if (choices.length === 0) {
+      promptLines.push(line);
+      // If next lines look like options (short, not ending in "?"), start capturing from next line.
+      // We keep the prompt as only the first line when possible.
+      if (promptLines.length >= 1) {
+        const remaining = lines.slice(i + 1);
+        const candidateChoices = remaining
+          .filter((l) => l.length > 0 && l.length <= 48)
+          .slice(0, 8);
+        if (candidateChoices.length >= 2) {
+          choices.push(...candidateChoices);
+          break;
+        }
+      }
+    }
+  }
+
+  const filteredLabels = choices.filter((label) => !shouldOmitNumberedChoiceLabel(label));
+  if (filteredLabels.length < 2) return null;
+
+  const prompt =
+    (promptLines[0] ?? "").trim() || "Please select one:";
+  const promptOneLine = prompt.replace(/\s+/g, " ").trim();
+
+  return {
+    id: `parsed_followup_${idx}`,
+    prompt,
+    choices: filteredLabels.map((label, i) => ({
+      label,
+      value: `parsed_${idx}_${i}`,
+      sendAs: promptOneLine ? `${promptOneLine} — ${label}` : label,
+    })),
+  };
+}
+
 function inferStructuredFollowUpFallback(q: string, idx: number): StructuredFollowUp {
   const lower = q.toLowerCase();
+
+  const lines = q.split(/\n/).map((l) => l.trim()).filter(Boolean);
+  const firstLine = (lines[0] ?? "").trim();
+  const promptFromAgent = firstLine && firstLine.length <= 140 ? firstLine : "";
 
   if (
     lower.includes("assistance") ||
@@ -647,7 +838,7 @@ function inferStructuredFollowUpFallback(q: string, idx: number): StructuredFoll
   ) {
     return {
       id: `assistance_type_${idx}`,
-      prompt: "What kind of assistance do you need most right now? Choose one:",
+      prompt: promptFromAgent || "What kind of assistance do you need most right now? Choose one:",
       choices: [
         { label: "Funding", value: "funding", sendAs: "Assistance type: funding" },
         { label: "Incentives", value: "incentives", sendAs: "Assistance type: incentives" },
@@ -816,7 +1007,12 @@ function mapFollowUpStringToStructured(
   if (!qClean.trim() || isGenericFollowUpPlaceholder(qClean)) {
     return structuredFollowUpWhenPromptMissing(idx);
   }
-  return parseNumberedChoicesFromFollowUp(qClean, idx) ?? inferStructuredFollowUpFallback(qClean, idx);
+  return (
+    parseNumberedChoicesFromFollowUp(qClean, idx) ??
+    parseBulletedChoicesFromFollowUp(qClean, idx) ??
+    parsePlainLineChoicesFromFollowUp(qClean, idx) ??
+    inferStructuredFollowUpFallback(qClean, idx)
+  );
 }
 
 function newSessionId(): string {
@@ -863,46 +1059,66 @@ function ProgramRecCards({ recs }: { recs: ProgramRecommendation[] }) {
             </div>
 
             <div className="p-4">
-              {r.who_its_for ? (
-                <div className="mb-3 text-sm text-slate-700">
-                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                    Who it’s for
-                  </div>
-                  <div className="mt-1">{r.who_its_for}</div>
-                </div>
-              ) : null}
+              {r.who_its_for || r.why_fit || r.eligibility_bullets?.length ? (
+                <dl className="divide-y divide-slate-100 text-sm text-slate-700">
+                  {r.who_its_for ? (
+                    <div className="grid grid-cols-1 gap-1 py-2 sm:grid-cols-[8.5rem_minmax(0,1fr)] sm:gap-x-4 sm:gap-y-0">
+                      <dt className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 sm:pt-[2px]">
+                        What it’s for
+                      </dt>
+                      <dd className="min-w-0">
+                        {(() => {
+                          const items = parseUseCaseList(r.who_its_for ?? "");
+                          if (items.length <= 1) {
+                            const single = items[0] ?? humanizeUseCaseToken(r.who_its_for);
+                            return <div className="leading-6 text-slate-800">{single}</div>;
+                          }
+                          return (
+                            <div className="flex flex-wrap gap-2 pt-0.5">
+                              {items.map((it) => (
+                                <span
+                                  key={it}
+                                  className="inline-flex items-center rounded-full border border-slate-200 bg-white px-2.5 py-1 text-xs font-semibold text-slate-800 shadow-sm"
+                                >
+                                  {it}
+                                </span>
+                              ))}
+                            </div>
+                          );
+                        })()}
+                      </dd>
+                    </div>
+                  ) : null}
 
-              {r.why_fit ? (
-                <div className="rounded-xl bg-slate-50 p-3 text-sm text-slate-700">
-                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                    Why this fits
-                  </div>
-                  <div className="mt-1">{r.why_fit}</div>
-                </div>
-              ) : null}
+                  {r.why_fit ? (
+                    <div className="grid grid-cols-1 gap-1 py-2 sm:grid-cols-[8.5rem_minmax(0,1fr)] sm:gap-x-4 sm:gap-y-0">
+                      <dt className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 sm:pt-[2px]">
+                        Why this fits
+                      </dt>
+                      <dd className="min-w-0 leading-6 text-slate-800">{r.why_fit}</dd>
+                    </div>
+                  ) : null}
 
-              {r.tags?.length ? (
-                <div className={cn("flex flex-wrap gap-2", r.why_fit ? "mt-3" : "")}>
-                  {r.tags.slice(0, 6).map((t) => (
-                    <span
-                      key={t}
-                      className="rounded-full bg-slate-100 px-2 py-1 text-xs font-medium text-slate-700"
-                    >
-                      {t}
-                    </span>
-                  ))}
-                </div>
-              ) : null}
-
-              {r.eligibility_bullets?.length ? (
-                <ul className="mt-3 space-y-1 text-sm text-slate-700">
-                  {r.eligibility_bullets.slice(0, 4).map((b, i) => (
-                    <li key={i} className="flex gap-2">
-                      <span className="mt-2 inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-slate-400" />
-                      <span className="min-w-0">{b}</span>
-                    </li>
-                  ))}
-                </ul>
+                  {r.eligibility_bullets?.length ? (
+                    <div className="grid grid-cols-1 gap-1 py-2 sm:grid-cols-[8.5rem_minmax(0,1fr)] sm:gap-x-4 sm:gap-y-0">
+                      <dt className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 sm:pt-[2px]">
+                        Key notes
+                      </dt>
+                      <dd className="min-w-0">
+                        <ul className="list-disc space-y-1 pl-5 leading-6 text-slate-800">
+                          {r.eligibility_bullets
+                            .filter((b) => Boolean(b && b.trim()))
+                            .slice(0, 3)
+                            .map((b, i) => (
+                              <li key={`${idx}-elig-${i}`}>
+                                {b}
+                              </li>
+                            ))}
+                        </ul>
+                      </dd>
+                    </div>
+                  ) : null}
+                </dl>
               ) : null}
             </div>
 
@@ -939,6 +1155,7 @@ type OrchestrationStepDisplay = {
   key: string;
   title: string;
   detail: string;
+  status?: string;
   tag?: string;
   meta?: MetricMetaRow[];
 };
@@ -973,42 +1190,52 @@ function AgentOrchestrationPanel({
         : steps.length - 1;
 
   const activeStep = activeIdx >= 0 ? steps[activeIdx] : undefined;
+  const activeStatus = (activeStep?.status ?? "").toLowerCase();
+  const activeSucceeded =
+    activeStatus === "success" ||
+    activeStatus === "succeeded" ||
+    activeStatus === "completed" ||
+    activeStatus === "complete";
+
+  function headerLineForActiveStep(step: OrchestrationStepDisplay): string {
+    const base = step.title;
+    if (!activeSucceeded) return base;
+
+    // Stage-specific success phrasing
+    if (step.key === "kb_fetched") return "KB Fetched Successfully";
+    if (step.key === "memory_saved") return "Saved in Memory";
+    if (step.key === "generating_answer") return "Answer Generated";
+    if (step.key === "agent_started") return "Agent Started";
+    return base;
+  }
+
   const collapsedSummaryLine =
-    orchestrationDone && stepCount > 0
-      ? `● ${stepCount} step${stepCount === 1 ? "" : "s"} completed`
-      : orchestrationDone
-        ? "I've completed your request"
-        : activeStep
-          ? slow
-            ? `Still working — ${activeStep.title}`
-            : activeStep.title
-          : slow
-            ? "Still working on it — thanks for your patience"
-            : "Working on your request";
+    orchestrationDone
+      ? "Process Complete"
+      : activeStep
+        ? headerLineForActiveStep(activeStep)
+        : slow
+          ? "Working…"
+          : "Starting…";
 
   return (
     <div className="flex justify-start">
-      <div className="w-full max-w-[92%] overflow-hidden rounded-2xl border border-stone-200/80 bg-[#FAF7F2] shadow-sm">
+      <div className="w-full max-w-[92%] overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm">
         <button
           type="button"
           aria-expanded={orchestrationExpanded}
           onClick={onToggleExpanded}
-          className="flex w-full items-center gap-2.5 rounded-xl border border-stone-200/70 bg-[#EDE8DF] px-3.5 py-2.5 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.65)] transition hover:bg-[#E8E2D8]"
+          className="flex w-full items-center gap-2.5 rounded-xl border border-slate-200/80 bg-slate-50 px-3.5 py-2.5 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.65)] transition hover:bg-slate-100"
         >
-          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-stone-200/80 text-stone-600">
+          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-200/70 text-slate-700">
             <IconBolt className="h-4 w-4" />
           </span>
           <span className="min-w-0 flex-1">
-            <span className="line-clamp-1 text-[13px] font-medium leading-snug text-stone-800">
+            <span className="line-clamp-1 text-[13px] font-medium leading-snug text-slate-800">
               {collapsedSummaryLine}
             </span>
           </span>
-          {stepCount > 0 && !(orchestrationDone && stepCount > 0) ? (
-            <span className="shrink-0 rounded-full bg-stone-200/90 px-2 py-0.5 text-[11px] font-semibold tabular-nums text-stone-600">
-              {stepCount}
-            </span>
-          ) : null}
-          <span className="flex shrink-0 items-center gap-1.5 text-stone-500">
+          <span className="flex shrink-0 items-center gap-1.5 text-slate-500">
             <IconChevron className="h-4 w-4" down={orchestrationExpanded} />
             {orchestrationDone ? (
               <span className="flex h-7 w-7 items-center justify-center rounded-full bg-emerald-100/90 text-emerald-700">
@@ -1023,7 +1250,7 @@ function AgentOrchestrationPanel({
             {steps.length ? (
               <div className="relative pl-2">
                 <div
-                  className="absolute bottom-2 left-[15px] top-2 w-px bg-gradient-to-b from-stone-300/90 via-stone-200 to-transparent"
+                  className="absolute bottom-2 left-[15px] top-2 w-px bg-gradient-to-b from-slate-300/80 via-slate-200 to-transparent"
                   aria-hidden
                 />
                 <ul className="space-y-0">
@@ -1037,10 +1264,10 @@ function AgentOrchestrationPanel({
                         <div className="relative z-[1] flex shrink-0 flex-col items-center">
                           <span
                             className={cn(
-                              "flex h-7 w-7 items-center justify-center rounded-full border bg-[#FFFCF8] shadow-sm",
+                              "flex h-7 w-7 items-center justify-center rounded-full border bg-white shadow-sm",
                               isDone && "border-emerald-200/90 bg-emerald-50/90",
                               isActive && "border-amber-300/80 bg-amber-50/90",
-                              isPending && "border-stone-200 bg-stone-50/90",
+                              isPending && "border-slate-200 bg-slate-50/90",
                             )}
                           >
                             {isDone ? (
@@ -1057,20 +1284,20 @@ function AgentOrchestrationPanel({
                         </div>
                         <div className="min-w-0 flex-1 pt-0.5">
                           <div className="flex items-start justify-between gap-2">
-                            <span className="min-w-0 text-[13px] font-semibold text-stone-900">{s.title}</span>
+                            <span className="min-w-0 text-[13px] font-semibold text-slate-900">{s.title}</span>
                             {s.tag ? (
-                              <span className="shrink-0 rounded-full border border-stone-200/80 bg-stone-100/80 px-2 py-0.5 text-[10px] font-medium capitalize text-stone-500">
+                              <span className="shrink-0 rounded-full border border-slate-200/80 bg-slate-100 px-2 py-0.5 text-[10px] font-medium capitalize text-slate-600">
                                 {s.tag}
                               </span>
                             ) : null}
                           </div>
-                          <p className="mt-0.5 text-[12px] leading-relaxed text-stone-600">{s.detail}</p>
+                          <p className="mt-0.5 text-[12px] leading-relaxed text-slate-600">{s.detail}</p>
                           {s.meta?.length ? (
-                            <dl className="mt-2 space-y-1 rounded-lg border border-stone-200/80 bg-white/90 px-2.5 py-2 text-[10px] leading-snug text-stone-600 shadow-[inset_0_1px_0_rgba(255,255,255,0.6)]">
+                            <dl className="mt-2 space-y-1 rounded-lg border border-slate-200/80 bg-slate-50 px-2.5 py-2 text-[10px] leading-snug text-slate-600 shadow-[inset_0_1px_0_rgba(255,255,255,0.6)]">
                               {s.meta.map((row, mi) => (
                                 <div key={`${s.key}-${idx}-${mi}`} className="flex gap-2">
-                                  <dt className="w-[4.5rem] shrink-0 font-medium text-stone-500">{row.label}</dt>
-                                  <dd className="min-w-0 break-all font-mono text-[10px] text-stone-700">{row.value}</dd>
+                                  <dt className="w-[4.5rem] shrink-0 font-medium text-slate-500">{row.label}</dt>
+                                  <dd className="min-w-0 break-all font-mono text-[10px] text-slate-700">{row.value}</dd>
                                 </div>
                               ))}
                             </dl>
@@ -1087,21 +1314,21 @@ function AgentOrchestrationPanel({
             {sessionId ? (
               <div
                 className={cn(
-                  "border-t border-stone-200/80 px-1 pt-2.5 text-[10px] text-stone-500",
+                  "border-t border-slate-200/80 px-1 pt-2.5 text-[10px] text-slate-500",
                   steps.length ? "mt-3" : "mt-1",
                 )}
               >
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                   <span>
-                    <span className="font-semibold text-stone-600">Session</span>{" "}
-                    <code className="rounded bg-stone-200/60 px-1 py-0.5 font-mono text-stone-800">
+                    <span className="font-semibold text-slate-600">Session</span>{" "}
+                    <code className="rounded bg-slate-100 px-1 py-0.5 font-mono text-slate-800">
                       {truncateText(sessionId, 44)}
                     </code>
                   </span>
-                  <span className="text-stone-400">·</span>
+                  <span className="text-slate-400">·</span>
                   <span>Metrics: Lyzr Studio WebSocket (via server)</span>
-                  <span className="text-stone-400">·</span>
-                  <span className="text-stone-500">API keys stay on the server</span>
+                  <span className="text-slate-400">·</span>
+                  <span className="text-slate-500">API keys stay on the server</span>
                 </div>
               </div>
             ) : null}
@@ -1320,23 +1547,24 @@ export function ProgramAdvisor({ variant = "floating", defaultOpen = false }: Pr
     // Latest in_progress/running step wins.
     for (let i = metricsEntries.length - 1; i >= 0; i--) {
       const st = metricsEntries[i].status?.toLowerCase();
-      if (st === "in_progress" || st === "running") return metricsEntries[i].heading;
+      if (st === "in_progress" || st === "running") {
+        const stage = canonicalStageFromHeading(metricsEntries[i].heading);
+        return stage ?? metricsEntries[i].heading;
+      }
     }
-    return metricsEntries.length ? metricsEntries[metricsEntries.length - 1].heading : undefined;
+    if (!metricsEntries.length) return undefined;
+    const lastHeading = metricsEntries[metricsEntries.length - 1].heading;
+    return canonicalStageFromHeading(lastHeading) ?? lastHeading;
   }, [metricsEntries]);
 
   const orchestrationDone = useMemo(() => {
-    const last = metricsEntries[metricsEntries.length - 1];
-    if (!last) return false;
-    const h = (last.heading ?? "").toLowerCase();
-    const st = (last.status ?? "").toLowerCase();
-    return (
-      h.includes("agent_process_end") ||
-      h.includes("process_end") ||
-      h.endsWith("end") ||
-      st === "success" ||
-      st === "completed"
-    );
+    // Only consider the run "done" when we explicitly observe a process-complete stage.
+    // Avoid heuristic matches like `endsWith("end")` (too many false positives).
+    for (let i = metricsEntries.length - 1; i >= 0; i--) {
+      const stage = canonicalStageFromHeading(metricsEntries[i].heading);
+      if (stage === "process_complete") return true;
+    }
+    return false;
   }, [metricsEntries]);
 
   const orchestrationDisplaySteps = useMemo((): OrchestrationStepDisplay[] => {
@@ -1351,16 +1579,39 @@ export function ProgramAdvisor({ variant = "floating", defaultOpen = false }: Pr
             meta: e.meta,
           }));
 
-    return source
-      .filter((s) => (s.text?.trim()?.length ?? 0) > 0)
-      .map((s) => ({
-        key: s.heading,
-        title: friendlyOrchestrationTitle(s.heading),
-        detail: truncateText(s.text, 180),
-        tag: orchestrationSubtleTag(s.heading),
+    const byCanonicalStage = new Map<
+      CanonicalOrchestrationStageKey,
+      { text: string; heading: string; meta?: MetricMetaRow[]; status?: string }
+    >();
+
+    for (const s of source) {
+      const canonical = canonicalStageFromHeading(s.heading);
+      if (!canonical) continue;
+      const text = s.text?.trim();
+      byCanonicalStage.set(canonical, {
+        text: text && text.length > 0 ? text : "",
+        heading: s.heading,
         meta: s.meta,
-      }));
-  }, [workflowSteps, metricsEntries]);
+        status: s.status,
+      });
+    }
+
+    return CANONICAL_ORCHESTRATION_STAGES.map((stage) => {
+      const fromMetric = byCanonicalStage.get(stage.key);
+      const detail = truncateText(fromMetric?.text || stage.defaultDetail, 180);
+      const tag = orchestrationSubtleTag(fromMetric?.heading || stage.key);
+      const title =
+        stage.key === "process_complete" && orchestrationDone ? "Process Complete" : stage.title;
+      return {
+        key: stage.key,
+        title,
+        detail,
+        status: fromMetric?.status,
+        tag,
+        meta: fromMetric?.meta,
+      };
+    });
+  }, [workflowSteps, metricsEntries, orchestrationDone]);
 
   const canSend = useMemo(() => input.trim().length > 0 && !busy, [input, busy]);
 
@@ -1374,6 +1625,34 @@ export function ProgramAdvisor({ variant = "floating", defaultOpen = false }: Pr
     ],
     [],
   );
+
+  type SuggestedReplyChip = { label: string; sendAs: string };
+
+  const suggestedReplyChips = useMemo((): SuggestedReplyChip[] => {
+    if (busy) return [];
+    if (structuredFollowUps?.length) return [];
+    if (messages.length === 0) return [];
+    if (messages[messages.length - 1]?.role !== "assistant") return [];
+
+    const categoryChips: SuggestedReplyChip[] = [
+      { label: "Funding", sendAs: "Assistance type: funding" },
+      { label: "Incentives", sendAs: "Assistance type: incentives" },
+      { label: "Procurement", sendAs: "Assistance type: procurement" },
+      { label: "Technical assistance", sendAs: "Assistance type: technical_assistance" },
+      { label: "Real estate", sendAs: "Assistance type: real_estate" },
+    ];
+
+    if (recs?.length) {
+      return [
+        ...categoryChips,
+        { label: "Refine by location", sendAs: "Refine by location" },
+        { label: "Start over", sendAs: "Start a new session" },
+      ];
+    }
+
+    // Default: after any assistant response, offer quick category pivots.
+    return categoryChips;
+  }, [busy, structuredFollowUps?.length, messages, recs?.length]);
 
   const fabRef = useRef<HTMLDivElement | null>(null);
 
@@ -1434,6 +1713,31 @@ export function ProgramAdvisor({ variant = "floating", defaultOpen = false }: Pr
     opts?: { discoveryBatchComplete?: boolean },
   ): string {
     const contextBits = formatContextBits(userProfile);
+    const b = body.trim().toLowerCase();
+    const isMeta =
+      b === "what else can you do" ||
+      b === "what else can you do?" ||
+      b.includes("what else can you do") ||
+      b.includes("what can you do") ||
+      b.includes("what programs are there") ||
+      b.includes("what programs do you have") ||
+      b.includes("list programs") ||
+      b.includes("how many programs") ||
+      b.includes("how many program") ||
+      b.includes("what language") ||
+      b.includes("which language") ||
+      b.includes("what model") ||
+      b.includes("which model");
+    const metaHint = isMeta
+      ? [
+          "",
+          "Meta/general request detected (capabilities, language/model, or program count/list).",
+          "Reply in-scope with short plain text only: explain you help match users to NJEDA programs.",
+          "Do NOT recommend programs and do NOT ask follow-up questions in this turn.",
+          "Return JSON with recommendations: [] and followUps: [].",
+          "Invite the user to describe what they need help with, and say you'll ask 2–3 quick tap-to-answer questions next.",
+        ].join("\n")
+      : "";
     const firstTurnGuidance = isFirstTurn
       ? [
           "Conversation policy for this session:",
@@ -1451,13 +1755,14 @@ export function ProgramAdvisor({ variant = "floating", defaultOpen = false }: Pr
       body,
       firstTurnGuidance ? `\n\n${firstTurnGuidance}` : "",
       phaseBHint,
+      metaHint ? `\n\n${metaHint}` : "",
       contextBits.length > 0 ? `\n\nContext (already provided): ${contextBits.join(" | ")}` : "",
     ]
       .join("")
       .trim();
   }
 
-  function applyChatResponse(data: ApiResponse) {
+  function applyChatResponse(data: ApiResponse, opts?: { userPromptForFallback?: string }) {
     if (!data.ok && data.error) {
       setMessages((m) => [
         ...m,
@@ -1476,6 +1781,37 @@ export function ProgramAdvisor({ variant = "floating", defaultOpen = false }: Pr
     let assistantText =
       typeof data.assistantText === "string" ? extractPlainAssistantFromBlob(data.assistantText) : "";
 
+    const isMetaPrompt = (s: string): boolean => {
+      const b = s.trim().toLowerCase();
+      if (!b) return false;
+      return (
+        b.includes("what else can you do") ||
+        b.includes("what can you do") ||
+        b.includes("what programs are there") ||
+        b.includes("what programs do you have") ||
+        b.includes("list programs") ||
+        b.includes("how many programs") ||
+        b.includes("how many program") ||
+        b.includes("what language") ||
+        b.includes("which language") ||
+        b.includes("what model") ||
+        b.includes("which model")
+      );
+    };
+
+    const pushAssistantOnce = (content: string) => {
+      const nextContent = content.trim();
+      if (!nextContent) return;
+      setMessages((m) => {
+        const last = m[m.length - 1];
+        if (last?.role === "assistant" && last.content.trim() === nextContent) return m;
+        return [...m, { role: "assistant", content: nextContent }];
+      });
+    };
+
+    const userPrompt = (opts?.userPromptForFallback ?? "").trim();
+    const metaTurn = isMetaPrompt(userPrompt);
+
     if (assistantText.trim().startsWith("{")) {
       try {
         const j = JSON.parse(assistantText) as { assistantText?: string; assistant_text?: string };
@@ -1487,8 +1823,22 @@ export function ProgramAdvisor({ variant = "floating", defaultOpen = false }: Pr
         /* ignore */
       }
     }
-    if (assistantText.trim().startsWith("{") || looksLikeAdvisorJsonBlob(assistantText)) {
-      assistantText = "";
+
+    // Meta/general prompts should never trigger button follow-ups or recommendations.
+    // Show a short in-scope message, and invite the user to describe their NJEDA need.
+    if (metaTurn) {
+      setRecs(null);
+      setStructuredFollowUps(null);
+      setStructuredIdx(0);
+      followUpPendingRef.current = [];
+
+      const safe =
+        assistantText.trim() ||
+        "I can help match your situation to NJEDA programs. Tell me what you need help with (funding, incentives, procurement, technical assistance, or real estate) and I’ll ask 2–3 quick tap-to-answer questions before recommending 3 programs.";
+      pushAssistantOnce(safe);
+
+      if (data.userProfile) setUserProfile(data.userProfile);
+      return;
     }
 
     if (data.followUps?.length) {
@@ -1497,39 +1847,56 @@ export function ProgramAdvisor({ variant = "floating", defaultOpen = false }: Pr
         .slice(0, 3)
         .map((q, i) => mapFollowUpStringToStructured(q, i, { assistantProse: assistantText }));
       const introOnly = stripNumberedQuestionnaireSuffix(assistantText);
-      const fallbackIntro =
-        "To tailor recommendations, I have a few quick questions.";
       const firstPrompt = mapped[0]?.prompt?.trim() ?? "";
       const introTrim = introOnly.trim();
-      const introForUi = looksLikeAdvisorJsonBlob(introTrim) ? fallbackIntro : introTrim;
+      const introForUiRaw = looksLikeAdvisorJsonBlob(introTrim) ? "" : introTrim;
+      const introForUi = firstPrompt
+        ? removeTrailingQuestionFromIntro(introForUiRaw, firstPrompt)
+        : introForUiRaw;
 
       setMessages((m) => {
         const additions: ChatMessage[] = [];
-        if (firstPrompt && assistantIntroAlreadyContainsFirstQuestion(introForUi, firstPrompt)) {
-          additions.push({
-            role: "assistant",
-            content: introForUi.length > 0 ? introForUi : firstPrompt,
-          });
-        } else if (firstPrompt) {
-          additions.push({ role: "assistant", content: introForUi || fallbackIntro });
-          additions.push({ role: "assistant", content: firstPrompt });
-        } else {
-          additions.push({ role: "assistant", content: introForUi || fallbackIntro });
+        if (introForUi) {
+          additions.push({ role: "assistant", content: introForUi });
         }
         return [...m, ...additions];
       });
       setStructuredFollowUps(mapped);
       setStructuredIdx(0);
+      setRecs(null);
     } else if (assistantText.trim().length > 0) {
-      setMessages((m) => [...m, { role: "assistant", content: assistantText }]);
+      // If the agent returned a numbered-choice question inside assistantText (but no followUps array),
+      // auto-promote it to button UI so the user can tap an option.
+      const parsed = parseNumberedChoicesFromFollowUp(assistantText, 0);
+      if (parsed) {
+        const introOnly = stripNumberedQuestionnaireSuffix(assistantText);
+        const introTrim = introOnly.trim();
+        const introForUiRaw = looksLikeAdvisorJsonBlob(introTrim) ? "" : introTrim;
+        const introForUi = assistantIntroAlreadyContainsFirstQuestion(introForUiRaw, parsed.prompt)
+          ? ""
+          : removeTrailingQuestionFromIntro(introForUiRaw, parsed.prompt);
+
+        setMessages((m) => {
+          const additions: ChatMessage[] = [];
+          if (introForUi) additions.push({ role: "assistant", content: introForUi });
+          // Always show the prompt as the assistant bubble, while choices render as buttons below.
+          additions.push({ role: "assistant", content: parsed.prompt });
+          return [...m, ...additions];
+        });
+        setStructuredFollowUps([parsed]);
+        setStructuredIdx(0);
+      } else {
+        pushAssistantOnce(assistantText);
+      }
     } else {
-      setMessages((m) => [
-        ...m,
-        {
-          role: "assistant",
-          content: "Here are the best-matching NJEDA programs I found based on what you shared.",
-        },
-      ]);
+      const prompt = (opts?.userPromptForFallback ?? "").trim();
+      const recCount = data.recommendations?.length ?? 0;
+      const promptBit = prompt ? ` for “${truncateText(prompt, 90)}”` : "";
+      const content =
+        recCount > 0
+          ? `I found ${recCount} NJEDA program match${recCount === 1 ? "" : "es"}${promptBit}.`
+          : `I didn’t receive a readable response${promptBit}.`;
+      pushAssistantOnce(content);
     }
 
     if (data.userProfile) {
@@ -1570,9 +1937,15 @@ export function ProgramAdvisor({ variant = "floating", defaultOpen = false }: Pr
     setBusy(true);
     setSlow(false);
     setRecs(null);
-    setStructuredFollowUps(null);
-    setStructuredIdx(0);
-    followUpPendingRef.current = [];
+    // If we are in the middle of a guided follow-up batch, do not wipe it
+    // when the user sends an unrelated free-typed message. This prevents
+    // accidental loops where the agent keeps re-asking the first question.
+    // The "New Session" button is the explicit reset path.
+    if (!structuredFollowUps?.length) {
+      setStructuredFollowUps(null);
+      setStructuredIdx(0);
+      followUpPendingRef.current = [];
+    }
     resetAgentPipelineVisuals();
     setMessages((m) => [...m, { role: "user", content }]);
 
@@ -1586,7 +1959,7 @@ export function ProgramAdvisor({ variant = "floating", defaultOpen = false }: Pr
       });
       const data = (await res.json()) as ApiResponse;
       window.clearTimeout(t);
-      applyChatResponse(data);
+      applyChatResponse(data, { userPromptForFallback: content });
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Unknown error";
       setMessages((m) => [
@@ -1625,7 +1998,7 @@ export function ProgramAdvisor({ variant = "floating", defaultOpen = false }: Pr
       });
       const data = (await res.json()) as ApiResponse;
       window.clearTimeout(t);
-      applyChatResponse(data);
+      applyChatResponse(data, { userPromptForFallback: sendAsLines.join("\n\n") });
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Unknown error";
       setMessages((m) => [
@@ -1884,20 +2257,22 @@ export function ProgramAdvisor({ variant = "floating", defaultOpen = false }: Pr
                                   if (!batch?.length) return;
                                   const idx = Math.min(structuredIdx, batch.length - 1);
                                   const isLast = idx >= batch.length - 1;
+                                  const currentPrompt = safeUiFollowUpPrompt(batch[idx]?.prompt?.trim() ?? "");
                                   const nextLines = [...followUpPendingRef.current, c.sendAs];
                                   setMessages((m) => {
-                                    const next: ChatMessage[] = [
-                                      ...m,
-                                      { role: "user", content: c.label },
-                                    ];
-                                    if (!isLast) {
-                                  const nextPrompt = safeUiFollowUpPrompt(
-                                    batch[idx + 1]?.prompt?.trim() ?? "",
-                                  );
-                                  if (nextPrompt) {
-                                    next.push({ role: "assistant", content: nextPrompt });
-                                  }
+                                    const next: ChatMessage[] = [...m];
+
+                                    // While the Quick Questions card is visible, we keep the prompt there.
+                                    // Once the user selects an option, append the prompt into the transcript
+                                    // so it stays visible "above" after the card advances/disappears.
+                                    if (currentPrompt) {
+                                      const last = next[next.length - 1];
+                                      const alreadyLast =
+                                        last?.role === "assistant" && last.content.trim() === currentPrompt.trim();
+                                      if (!alreadyLast) next.push({ role: "assistant", content: currentPrompt });
                                     }
+
+                                    next.push({ role: "user", content: c.label });
                                     return next;
                                   });
                                   if (!isLast) {
@@ -1927,10 +2302,28 @@ export function ProgramAdvisor({ variant = "floating", defaultOpen = false }: Pr
                         </div>
                       </div>
                     ) : null}
+
+                    {!structuredFollowUps?.length && suggestedReplyChips.length ? (
+                      <div className="flex justify-start">
+                        <div className="flex max-w-full flex-wrap gap-2">
+                          {suggestedReplyChips.map((chip) => (
+                            <button
+                              key={chip.sendAs}
+                              type="button"
+                              disabled={busy}
+                              onClick={() => void sendMessage({ backendText: chip.sendAs, displayText: chip.label })}
+                              className="rounded-full border border-slate-200/90 bg-white px-3 py-1.5 text-xs font-semibold text-slate-800 shadow-sm transition hover:border-[#002b41]/35 hover:bg-[#a8cf45]/10 focus:outline-none focus:ring-2 focus:ring-[#002b41]/25 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              {chip.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
                 </div>
 
-                <div className="shrink-0 border-t border-slate-200/80 bg-white p-3">
+                <div className="shrink-0 bg-white p-3">
                   <div className="flex gap-2">
                     <textarea
                       value={input}
@@ -1962,9 +2355,6 @@ export function ProgramAdvisor({ variant = "floating", defaultOpen = false }: Pr
                     >
                       <IconSend className="h-5 w-5" />
                     </button>
-                  </div>
-                  <div className="mt-2 text-xs text-slate-500">
-                    Tip: include business type, NJ location, stage, and what you need. (Shift+Enter for a new line.)
                   </div>
                 </div>
               </div>

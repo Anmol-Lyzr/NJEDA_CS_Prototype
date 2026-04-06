@@ -61,13 +61,50 @@ function pickFirstString(value: unknown): string | undefined {
       const s = pickFirstString(c);
       if (s) return s;
     }
+
+    // Some upstream payloads nest the assistant string under non-standard keys
+    // (e.g. `bot_response`, `final`, `completion`, `choices[0].message.content`).
+    // As a last resort, scan object values to find the first plausible string.
+    const ignoreKeys = new Set([
+      "agent_id",
+      "session_id",
+      "sessionId",
+      "user_id",
+      "userId",
+      "status",
+      "ok",
+      "success",
+      "timestamp",
+      "created_at",
+      "updated_at",
+    ]);
+    const keys = Object.keys(obj).filter((k) => !ignoreKeys.has(k)).slice(0, 60);
+    for (const k of keys) {
+      const v = obj[k];
+      if (typeof v === "string") {
+        const t = v.trim();
+        if (t) return t;
+      }
+    }
+    for (const k of keys) {
+      const s = pickFirstString(obj[k]);
+      if (s) return s;
+    }
   }
   return undefined;
 }
 
 function extractJsonObject(text: string): unknown | undefined {
   const fenced = text.match(/```json\s*([\s\S]*?)```/i);
-  const candidate = fenced?.[1] ?? text;
+  let candidate = fenced?.[1] ?? text;
+  // Handle unterminated code fences like:
+  // ```json
+  // { ... }
+  // (missing trailing ``` due to model or transport truncation)
+  const trimmed = candidate.trimStart();
+  if (/^```(?:json)?\s*/i.test(trimmed) && !fenced) {
+    candidate = trimmed.replace(/^```(?:json)?\s*/i, "");
+  }
   const firstBrace = candidate.indexOf("{");
   const lastBrace = candidate.lastIndexOf("}");
   if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) return;
@@ -94,6 +131,10 @@ function normalizeLeadingAdvisorPayload(text: string): string {
   let t = text.replace(/^\uFEFF/, "").trim();
   const fenceFull = t.match(/^```(?:json)?\s*([\s\S]*?)```\s*$/im);
   if (fenceFull?.[1]) t = fenceFull[1].trim();
+  // Unterminated fence (common failure mode) — strip just the leading fence marker.
+  if (/^```(?:json)?\s*/i.test(t) && !t.includes("```", 3)) {
+    t = t.replace(/^```(?:json)?\s*/i, "").trim();
+  }
   if (!t.startsWith("{")) {
     const looksLikeAdvisorEnvelope =
       (t.includes('"assistantText"') || t.includes('"assistant_text"')) &&
@@ -166,9 +207,20 @@ function tryParseAdvisorRecord(text: string): Record<string, unknown> | undefine
  * Kept slightly broader than advisorJsonLooksShaped so we never show this blob to users.
  */
 export function looksLikeAdvisorJsonBlob(s: string): boolean {
-  const t = s.trim();
-  if (t.includes('"userProfile"') && t.includes('"assistantText"')) return true;
-  if (!t.startsWith("{")) return false;
+  const t0 = s.trim();
+  // Treat fenced JSON blobs as advisor envelopes too (even if fence is unterminated).
+  const t = /^```/m.test(t0) ? normalizeLeadingAdvisorPayload(t0) : t0;
+  if (t.includes('"userProfile"') && (t.includes('"assistantText"') || t.includes('"assistant_text"'))) return true;
+  if (!t.startsWith("{")) {
+    // Some transports prepend non-JSON prose before `{` — still treat as advisor JSON if it smells shaped.
+    if (
+      (t.includes('"assistantText"') || t.includes('"assistant_text"')) &&
+      (t.includes('"followUps"') || t.includes('"userProfile"') || t.includes('"recommendations"'))
+    ) {
+      return true;
+    }
+    return false;
+  }
   return (
     t.includes('"assistantText"') ||
     t.includes('"followUps"') ||
@@ -344,24 +396,95 @@ function tryAdvisorJsonFromRaw(raw: unknown): unknown | undefined {
   ) {
     return obj;
   }
+
+  // Fast-path common nesting keys first.
   for (const k of ["data", "result", "output", "response", "answer", "message", "content", "completion"]) {
     const v = obj[k];
+    if (typeof v === "string") {
+      const j = extractJsonObject(v);
+      if (j && typeof j === "object") return j;
+    }
     if (v && typeof v === "object") {
       const inner = v as Record<string, unknown>;
       if (
         Array.isArray(inner.followUps) ||
+        Array.isArray(inner.recommendations) ||
         typeof inner.assistantText === "string" ||
         typeof inner.assistant_text === "string"
       ) {
         return inner;
       }
     }
-    if (typeof v === "string") {
-      const j = extractJsonObject(v);
-      if (j && typeof j === "object") return j;
-    }
   }
-  return undefined;
+
+  // Deep-scan: upstream payloads vary (arrays, nested objects, JSON strings).
+  // Find the first plausible advisor envelope (bounded depth/size).
+  const seen = new Set<unknown>();
+  const looksLikeEnvelope = (o: Record<string, unknown>): boolean => {
+    return (
+      Array.isArray(o.followUps) ||
+      Array.isArray(o.recommendations) ||
+      typeof o.assistantText === "string" ||
+      typeof o.assistant_text === "string" ||
+      typeof o.follow_ups === "string" ||
+      typeof o.followups === "string"
+    );
+  };
+
+  function scan(node: unknown, depth: number): unknown | undefined {
+    if (!node || depth > 10) return undefined;
+    if (seen.has(node)) return undefined;
+    if (typeof node === "object") seen.add(node);
+
+    if (typeof node === "string") {
+      const t = node.trim();
+      if (t.length === 0 || t.length > 200_000) return undefined;
+      const j = extractJsonObject(t);
+      if (j && typeof j === "object" && !Array.isArray(j)) {
+        const o = j as Record<string, unknown>;
+        if (looksLikeEnvelope(o)) return o;
+      }
+      return undefined;
+    }
+
+    if (Array.isArray(node)) {
+      for (let i = 0; i < Math.min(node.length, 40); i++) {
+        const found = scan(node[i], depth + 1);
+        if (found) return found;
+      }
+      return undefined;
+    }
+
+    if (typeof node !== "object") return undefined;
+    const o = node as Record<string, unknown>;
+    if (looksLikeEnvelope(o)) return o;
+
+    // Prefer scanning likely payload keys first, then the rest.
+    const preferredKeys = [
+      "data",
+      "result",
+      "output",
+      "response",
+      "answer",
+      "message",
+      "content",
+      "completion",
+      "choices",
+      "payload",
+      "body",
+    ];
+    const keys = [
+      ...preferredKeys.filter((k) => k in o),
+      ...Object.keys(o).filter((k) => !preferredKeys.includes(k)).slice(0, 80),
+    ];
+    for (const k of keys) {
+      const found = scan(o[k], depth + 1);
+      if (found) return found;
+    }
+    return undefined;
+  }
+
+  return scan(raw, 0);
 }
 
 /**
@@ -473,6 +596,23 @@ function flattenFollowUpStrings(items: string[]): string[] {
   const out: string[] = [];
   for (const item of items) {
     let t = item.replace(/^\uFEFF/, "").trim();
+
+    // Upstream sometimes returns followUps as individual JSON-string fragments, e.g.
+    // "\"Where in NJ...?\n1. ...\","
+    // Strip leading/trailing quotes and trailing commas so downstream parsers can work.
+    for (let i = 0; i < 4; i++) {
+      const tt = t.trim();
+      const strippedTrailingComma = tt.endsWith(",") ? tt.slice(0, -1).trimEnd() : tt;
+      const strippedQuotes =
+        strippedTrailingComma.length >= 2 &&
+        strippedTrailingComma.startsWith('"') &&
+        strippedTrailingComma.endsWith('"')
+          ? strippedTrailingComma.slice(1, -1)
+          : strippedTrailingComma;
+      if (strippedQuotes === t) break;
+      t = strippedQuotes.trim();
+    }
+
     if (!t.startsWith("{") && t.includes("{")) {
       t = normalizeLeadingAdvisorPayload(t);
     }
@@ -498,11 +638,38 @@ function flattenFollowUpStrings(items: string[]): string[] {
       }
       const loose = extractFollowUpQuestionLoose(t);
       if (loose) {
-        out.push(loose);
+        // If "loose" extraction still looks like an advisor JSON blob, prefer extracting
+        // actual question blocks instead of feeding JSON-ish text into the follow-up UI.
+        if (!looksLikeAdvisorJsonBlob(loose)) {
+          out.push(loose);
+          continue;
+        }
+      }
+    }
+
+    // Last-resort recovery: sometimes a followUp item contains a large (possibly malformed)
+    // JSON-looking blob that includes one or more "question + numbered options" blocks.
+    // Extract those blocks so the UI can render the agent's dynamic options.
+    if ((t.includes('"followUps"') || t.includes('"follow_ups"') || t.includes("followUps")) && t.includes("\n1.")) {
+      // Common case: we received only the *first* followUp string but wrapped in a JSON fragment like:
+      // { ... "followUps": [ "Question?\n1. ...\n2. ..." ,
+      // Extract the string content after followUps[0] opening quote.
+      const firstFollowUpMatch = t.match(/"followUps"\s*:\s*\[\s*"([\s\S]*?)"\s*$/);
+      if (firstFollowUpMatch?.[1]?.trim()) {
+        const recovered = firstFollowUpMatch[1].trim();
+        if (recovered.includes("\n1.")) {
+          out.push(recovered);
+          continue;
+        }
+      }
+      const blocks = splitBundledFollowUpProse(t);
+      if (blocks.length) {
+        out.push(...blocks);
         continue;
       }
     }
-    out.push(item);
+
+    out.push(t);
   }
   return out.slice(0, 10);
 }
@@ -642,7 +809,7 @@ export function shapeAdvisorResponse(raw: unknown): AdvisorResponse {
     if (fromRaw) maybeJson = fromRaw;
   }
 
-  let recommendations = maybeJson ? normalizeRecommendations(maybeJson) : undefined;
+  const recommendations = maybeJson ? normalizeRecommendations(maybeJson) : undefined;
   let followUps = maybeJson ? normalizeFollowUps(maybeJson) : undefined;
   if (!followUps?.length && raw && typeof raw === "object") {
     const fromTop = normalizeFollowUps(raw as Record<string, unknown>);
@@ -692,9 +859,25 @@ export function shapeAdvisorResponse(raw: unknown): AdvisorResponse {
   assistantText = stripAdvisorJsonEnvelope(assistantText ?? "");
 
   const directRecs = normalizeRecommendations(raw);
+  const mergedRecs = directRecs ?? recommendations;
+
+  // Last-resort: if shaping/JSON peeling produced no user-facing content, recover something safe.
+  // This is especially important for generic/meta questions where upstream may return an empty
+  // advisor envelope or a nested payload we fail to unwrap cleanly.
+  if (
+    (!assistantText || assistantText.trim().length === 0) &&
+    (!followUps || followUps.length === 0) &&
+    (!mergedRecs || mergedRecs.length === 0)
+  ) {
+    const rawText = pickFirstString(raw) ?? "";
+    const recovered = extractPlainAssistantFromBlob(rawText).trim();
+    assistantText =
+      recovered ||
+      "Tell me what you’re trying to accomplish and I’ll recommend NJEDA programs. You can also pick a category to get started.";
+  }
   return {
     assistantText,
-    recommendations: directRecs ?? recommendations,
+    recommendations: mergedRecs,
     followUps,
     userProfile,
     raw,
